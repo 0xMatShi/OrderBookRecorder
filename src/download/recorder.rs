@@ -57,8 +57,7 @@ impl Recorder {
                     return Ok(());
                 }
                 Err(e) => {
-                    warn!("📉 WS отключен: {}. Переподключение через 1 сек...", e);
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    warn!("📉 WS отключен: {}. Переподключение...", e);
                 }
             }
         }
