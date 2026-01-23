@@ -40,8 +40,6 @@ impl Recorder {
         info!("📝 Запись в файл: {:?}", filepath);
 
         let tick_count = Arc::new(AtomicU32::new(0));
-        let mut reconnect_delay = Duration::from_secs(1);
-        const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(60);
 
         loop {
             if Utc::now() >= end_date {
@@ -59,9 +57,8 @@ impl Recorder {
                     return Ok(());
                 }
                 Err(e) => {
-                    warn!("📉 WS отключен: {}. Переподключение через {:?}...", e, reconnect_delay);
-                    tokio::time::sleep(reconnect_delay).await;
-                    reconnect_delay = (reconnect_delay * 2).min(MAX_RECONNECT_DELAY);
+                    warn!("📉 WS отключен: {}. Переподключение через 1 сек...", e);
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
         }
