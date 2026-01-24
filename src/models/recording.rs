@@ -37,6 +37,7 @@ impl Recording {
         Self { metadata, ticks }
     }
 
+    #[allow(dead_code)]
     pub fn duration_ms(&self) -> i64 {
         if self.ticks.is_empty() {
             return 0;

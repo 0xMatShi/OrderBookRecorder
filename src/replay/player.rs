@@ -1,4 +1,5 @@
 use std::time::Instant;
+use chrono::{TimeZone, Utc};
 use crate::models::Recording;
 
 pub const SPEEDS: [f64; 8] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
@@ -96,27 +97,16 @@ impl ReplayState {
 
     pub fn current_time_str(&self) -> String {
         if self.recording.ticks.is_empty() {
-            return "00:00.000".to_string();
+            return "00:00:00.000".to_string();
         }
 
-        let first_ts = self.recording.ticks[0].ts;
         let current_ts = self.recording.ticks[self.current_tick].ts;
-        let elapsed_ms = current_ts - first_ts;
-
-        let minutes = elapsed_ms / 60000;
-        let seconds = (elapsed_ms % 60000) / 1000;
-        let millis = elapsed_ms % 1000;
-
-        format!("{:02}:{:02}.{:03}", minutes, seconds, millis)
+        let datetime = Utc.timestamp_millis_opt(current_ts).unwrap();
+        datetime.format("%H:%M:%S%.3f").to_string()
     }
 
     pub fn total_time_str(&self) -> String {
-        let duration_ms = self.recording.duration_ms();
-        let minutes = duration_ms / 60000;
-        let seconds = (duration_ms % 60000) / 1000;
-        let millis = duration_ms % 1000;
-
-        format!("{:02}:{:02}.{:03}", minutes, seconds, millis)
+        self.recording.metadata.end_time.format("%H:%M:%S%.3f").to_string()
     }
     
     #[allow(dead_code)]
