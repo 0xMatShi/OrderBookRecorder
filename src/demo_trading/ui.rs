@@ -61,6 +61,10 @@ fn run_event_loop(
                         KeyCode::Char('l') => state.move_ticks(10),
                         KeyCode::Char('+') | KeyCode::Char('=') => state.speed_up(),
                         KeyCode::Char('-') => state.speed_down(),
+                        KeyCode::Char('1') => state.jump_to_quarter(1),
+                        KeyCode::Char('2') => state.jump_to_quarter(2),
+                        KeyCode::Char('3') => state.jump_to_quarter(3),
+                        KeyCode::Char('4') => state.jump_to_quarter(4),
                         _ => {}
                     }
                 }
@@ -115,10 +119,19 @@ fn draw_info_panel(frame: &mut Frame, state: &DemoTradingState, area: Rect) {
     };
     let speed_str = format!("{}x", SPEEDS[state.speed_index]);
 
+    // Calculate current quarter
+    let total_ticks = state.recording.ticks.len();
+    let current_quarter = if total_ticks > 0 {
+        ((state.current_tick as f64 / total_ticks as f64) * 4.0).ceil() as u8
+    } else {
+        0
+    };
+
     let tick_info = format!(
-        "{} / {}",
+        "{} / {} (Q{})",
         state.current_tick + 1,
-        state.recording.ticks.len()
+        total_ticks,
+        current_quarter
     );
 
     let time_info = format!("{} / {}", state.current_time_str(), state.total_time_str());
@@ -142,6 +155,10 @@ fn draw_info_panel(frame: &mut Frame, state: &DemoTradingState, area: Rect) {
         Line::from(vec![
             Span::styled("Tick: ", Style::default().fg(Color::Gray)),
             Span::styled(tick_info, Style::default().fg(Color::Yellow)),
+            Span::styled(
+                "  [1-4: Jump to Quarters]",
+                Style::default().fg(Color::DarkGray),
+            ),
         ]),
         Line::from(vec![
             Span::styled("Time: ", Style::default().fg(Color::Gray)),

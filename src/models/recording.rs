@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordingMetadata {
+    #[serde(default)]
+    pub name: String,
     pub title: String,
     pub slug: String,
     pub up_token: String,
@@ -10,6 +12,17 @@ pub struct RecordingMetadata {
     pub start_time: DateTime<Utc>,
     pub end_time: DateTime<Utc>,
     pub total_ticks: u32,
+}
+
+impl RecordingMetadata {
+    /// Get display name - uses `name` if not empty, otherwise falls back to `slug`
+    pub fn display_name(&self) -> &str {
+        if !self.name.is_empty() {
+            &self.name
+        } else {
+            &self.slug
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

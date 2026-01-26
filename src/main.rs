@@ -131,7 +131,7 @@ fn replay_mode() -> Result<()> {
         let metadata = RecordingStorage::load_metadata(path);
         match metadata {
             Ok(m) => {
-                println!("{}. {} ({} ticks)", i + 1, m.slug, m.total_ticks);
+                println!("{}. {} ({} ticks)", i + 1, m.display_name(), m.total_ticks);
             }
             Err(_) => {
                 println!(
@@ -187,11 +187,40 @@ fn demo_trading_mode() -> Result<()> {
     }
 
     println!("=== Available Recordings ===");
+    println!("Calculating results...\n");
+    
+    let mut all_results = Vec::new();
+    
     for (i, path) in recordings.iter().enumerate() {
         let metadata = RecordingStorage::load_metadata(path);
         match metadata {
             Ok(m) => {
-                println!("{}. {} ({} ticks)", i + 1, m.slug, m.total_ticks);
+                // Load recording and calculate result
+                match RecordingStorage::load_recording(path) {
+                    Ok(recording) => {
+                        let result = crate::demo_trading::calculate_event_result(&recording);
+                        let winner_str = match result.winner {
+                            Some(crate::demo_trading::Outcome::Up) => "UP",
+                            Some(crate::demo_trading::Outcome::Down) => "DOWN",
+                            None => "NONE",
+                        };
+                        
+                        let pnl_color = if result.pnl > 0.0 { "+" } else { "" };
+                        let result_str = format!(
+                            " (Up: {:.2} sh | Down: {:.2} sh | Spent: ${:.2} | Winner: {} | PnL: {}{:.2})",
+                            result.up_shares, result.down_shares, result.total_spent, winner_str, pnl_color, result.pnl
+                        );
+                        
+                        println!("{}. {} ({} ticks){}", 
+                            i + 1, m.display_name(), m.total_ticks, result_str);
+                        
+                        all_results.push(result);
+                    }
+                    Err(_) => {
+                        println!("{}. {} ({} ticks) (error calculating)", 
+                            i + 1, m.display_name(), m.total_ticks);
+                    }
+                };
             }
             Err(_) => {
                 println!(
@@ -201,6 +230,18 @@ fn demo_trading_mode() -> Result<()> {
                 );
             }
         }
+    }
+    
+    // Calculate and display statistics
+    if !all_results.is_empty() {
+        let total_pnl: f64 = all_results.iter().map(|r| r.pnl).sum();
+        let wins = all_results.iter().filter(|r| r.pnl > 0.0).count();
+        let total = all_results.len();
+        let winrate = (wins as f64 / total as f64) * 100.0;
+        
+        println!("\n=== Statistics ===");
+        println!("Total PnL: ${:.2}", total_pnl);
+        println!("Winrate: {:.1}% ({}/{})", winrate, wins, total);
     }
 
     print!(

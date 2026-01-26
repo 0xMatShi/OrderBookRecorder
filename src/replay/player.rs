@@ -2,7 +2,7 @@ use crate::models::Recording;
 use chrono::{TimeZone, Utc};
 use std::time::Instant;
 
-pub const SPEEDS: [f64; 8] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
+pub const SPEEDS: [f64; 10] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 3.0, 4.0];
 
 pub struct ReplayState {
     pub recording: Recording,

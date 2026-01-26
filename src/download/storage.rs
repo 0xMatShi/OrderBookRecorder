@@ -31,6 +31,7 @@ impl RecordingStorage {
         let filepath = self.recordings_dir.join(&filename);
 
         let metadata = RecordingMetadata {
+            name: String::new(), // Empty by default
             title: title.to_string(),
             slug: slug.to_string(),
             up_token: up_token.to_string(),
