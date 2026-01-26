@@ -1,6 +1,6 @@
-use std::time::Instant;
-use chrono::{TimeZone, Utc};
 use crate::models::Recording;
+use chrono::{TimeZone, Utc};
+use std::time::Instant;
 
 pub const SPEEDS: [f64; 8] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
 
@@ -49,7 +49,8 @@ impl ReplayState {
 
     pub fn move_ticks(&mut self, delta: i32) {
         let new_tick = self.current_tick as i32 + delta;
-        self.current_tick = new_tick.clamp(0, self.recording.ticks.len().saturating_sub(1) as i32) as usize;
+        self.current_tick =
+            new_tick.clamp(0, self.recording.ticks.len().saturating_sub(1) as i32) as usize;
     }
 
     pub fn move_seconds(&mut self, delta_seconds: i64) {
@@ -61,7 +62,9 @@ impl ReplayState {
         let target_ts = current_ts + (delta_seconds * 1000);
 
         // Binary search for the closest tick
-        let target_tick = self.recording.ticks
+        let target_tick = self
+            .recording
+            .ticks
             .binary_search_by(|t| t.ts.cmp(&target_ts))
             .unwrap_or_else(|i| i.saturating_sub(1));
 
@@ -106,9 +109,13 @@ impl ReplayState {
     }
 
     pub fn total_time_str(&self) -> String {
-        self.recording.metadata.end_time.format("%H:%M:%S%.3f").to_string()
+        self.recording
+            .metadata
+            .end_time
+            .format("%H:%M:%S%.3f")
+            .to_string()
     }
-    
+
     #[allow(dead_code)]
     pub fn is_at_end(&self) -> bool {
         self.current_tick >= self.recording.ticks.len().saturating_sub(1)

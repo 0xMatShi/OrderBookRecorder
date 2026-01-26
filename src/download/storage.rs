@@ -1,9 +1,9 @@
+use crate::models::{Recording, RecordingLine, RecordingMetadata, Tick};
+use anyhow::Result;
+use chrono::{DateTime, Utc};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use anyhow::Result;
-use chrono::{DateTime, Utc};
-use crate::models::{Recording, RecordingLine, RecordingMetadata, Tick};
 
 pub struct RecordingStorage {
     recordings_dir: PathBuf,
@@ -13,7 +13,9 @@ impl RecordingStorage {
     pub fn new(recordings_dir: &str) -> Result<Self> {
         let path = PathBuf::from(recordings_dir);
         fs::create_dir_all(&path)?;
-        Ok(Self { recordings_dir: path })
+        Ok(Self {
+            recordings_dir: path,
+        })
     }
 
     pub fn create_recording_file(

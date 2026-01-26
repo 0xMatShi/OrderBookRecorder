@@ -14,9 +14,9 @@ pub struct RecordingMetadata {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tick {
-    pub ts: i64,                     // Unix ms
-    pub up_bids: Vec<[f64; 2]>,      // [price, size] x 20
-    pub down_bids: Vec<[f64; 2]>,    // [price, size] x 20
+    pub ts: i64,                  // Unix ms
+    pub up_bids: Vec<[f64; 2]>,   // [price, size] x 20
+    pub down_bids: Vec<[f64; 2]>, // [price, size] x 20
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

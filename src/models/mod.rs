@@ -1,7 +1,7 @@
 pub mod api;
-pub mod websocket;
 pub mod recording;
+pub mod websocket;
 
 pub use api::*;
-pub use websocket::*;
 pub use recording::*;
+pub use websocket::*;

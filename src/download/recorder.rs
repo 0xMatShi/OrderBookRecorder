@@ -1,15 +1,15 @@
-use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use chrono::{DateTime, Utc};
-use tokio::time::{interval, Duration};
-use tracing::{info, warn};
 use anyhow::Result;
+use chrono::{DateTime, Utc};
+use futures_util::{SinkExt, StreamExt};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use tokio::time::{interval, Duration};
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use tracing::{info, warn};
 
-use crate::models::{BookMessage, SubscribeMessage, TargetMarket, Tick};
 use crate::download::storage::RecordingStorage;
+use crate::models::{BookMessage, SubscribeMessage, TargetMarket, Tick};
 
 const ORDER_BOOK_DEPTH: usize = 20;
 
@@ -49,7 +49,10 @@ impl Recorder {
                 return Ok(());
             }
 
-            match self.run_stream_once(target, &filepath, end_date, tick_count.clone()).await {
+            match self
+                .run_stream_once(target, &filepath, end_date, tick_count.clone())
+                .await
+            {
                 Ok(_) => {
                     let total = tick_count.load(Ordering::Relaxed);
                     RecordingStorage::update_total_ticks(&filepath, total)?;
@@ -76,7 +79,9 @@ impl Recorder {
             assets_ids: vec![target.up_token.clone(), target.down_token.clone()],
             msg_type: "market".to_string(),
         };
-        ws_stream.send(Message::Text(serde_json::to_string(&sub)?.into())).await?;
+        ws_stream
+            .send(Message::Text(serde_json::to_string(&sub)?.into()))
+            .await?;
 
         info!("✅ WebSocket подключен");
 

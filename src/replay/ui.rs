@@ -1,5 +1,4 @@
-use std::io::{self, stdout};
-use std::time::Duration;
+use anyhow::Result;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -9,7 +8,8 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Cell, Paragraph, Row, Table},
 };
-use anyhow::Result;
+use std::io::{self, stdout};
+use std::time::Duration;
 
 use crate::replay::player::{ReplayState, SPEEDS};
 
@@ -74,10 +74,7 @@ fn draw_ui(frame: &mut Frame, state: &ReplayState) {
     // Top panel: Info | Keys
     let top_layout = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(60),
-            Constraint::Percentage(40),
-        ])
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
         .split(main_layout[0]);
 
     draw_info_panel(frame, state, top_layout[0]);
@@ -86,10 +83,7 @@ fn draw_ui(frame: &mut Frame, state: &ReplayState) {
     // Bottom panel: UP Bids | DOWN Bids
     let books_layout = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ])
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(main_layout[1]);
 
     draw_order_book(frame, state, books_layout[0], true);
@@ -97,7 +91,11 @@ fn draw_ui(frame: &mut Frame, state: &ReplayState) {
 }
 
 fn draw_info_panel(frame: &mut Frame, state: &ReplayState, area: Rect) {
-    let status = if state.is_paused { "⏸ PAUSED" } else { "▶ PLAYING" };
+    let status = if state.is_paused {
+        "⏸ PAUSED"
+    } else {
+        "▶ PLAYING"
+    };
     let speed_str = format!("{}x", SPEEDS[state.speed_index]);
 
     let tick_info = format!(
@@ -106,20 +104,22 @@ fn draw_info_panel(frame: &mut Frame, state: &ReplayState, area: Rect) {
         state.recording.ticks.len()
     );
 
-    let time_info = format!(
-        "{} / {}",
-        state.current_time_str(),
-        state.total_time_str()
-    );
+    let time_info = format!("{} / {}", state.current_time_str(), state.total_time_str());
 
     let text = vec![
         Line::from(vec![
             Span::styled("Title: ", Style::default().fg(Color::Gray)),
-            Span::styled(&state.recording.metadata.title, Style::default().fg(Color::White)),
+            Span::styled(
+                &state.recording.metadata.title,
+                Style::default().fg(Color::White),
+            ),
         ]),
         Line::from(vec![
             Span::styled("Slug: ", Style::default().fg(Color::Gray)),
-            Span::styled(&state.recording.metadata.slug, Style::default().fg(Color::Cyan)),
+            Span::styled(
+                &state.recording.metadata.slug,
+                Style::default().fg(Color::Cyan),
+            ),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -138,13 +138,17 @@ fn draw_info_panel(frame: &mut Frame, state: &ReplayState, area: Rect) {
             Span::styled("Status: ", Style::default().fg(Color::Gray)),
             Span::styled(
                 status,
-                Style::default().fg(if state.is_paused { Color::Red } else { Color::Green }),
+                Style::default().fg(if state.is_paused {
+                    Color::Red
+                } else {
+                    Color::Green
+                }),
             ),
         ]),
     ];
 
-    let paragraph = Paragraph::new(text)
-        .block(Block::default().borders(Borders::ALL).title(" Info "));
+    let paragraph =
+        Paragraph::new(text).block(Block::default().borders(Borders::ALL).title(" Info "));
 
     frame.render_widget(paragraph, area);
 }
@@ -177,8 +181,8 @@ fn draw_keys_panel(frame: &mut Frame, area: Rect) {
         ]),
     ];
 
-    let paragraph = Paragraph::new(text)
-        .block(Block::default().borders(Borders::ALL).title(" Keys "));
+    let paragraph =
+        Paragraph::new(text).block(Block::default().borders(Borders::ALL).title(" Keys "));
 
     frame.render_widget(paragraph, area);
 }
@@ -191,7 +195,11 @@ fn draw_order_book(frame: &mut Frame, state: &ReplayState, area: Rect, is_up: bo
         &vec![]
     } else {
         let tick = &state.recording.ticks[state.current_tick];
-        if is_up { &tick.up_bids } else { &tick.down_bids }
+        if is_up {
+            &tick.up_bids
+        } else {
+            &tick.down_bids
+        }
     };
 
     let header = Row::new(vec![
@@ -217,7 +225,8 @@ fn draw_order_book(frame: &mut Frame, state: &ReplayState, area: Rect, is_up: bo
                 Cell::from(format!("{}", i + 1)).style(Style::default().fg(Color::DarkGray)),
                 Cell::from(format!("{:.2}", price)).style(Style::default().fg(Color::White)),
                 Cell::from(format!("{:.0}", size)).style(Style::default().fg(Color::Yellow)),
-                Cell::from(format!("${:.0}", cumulative_cost)).style(Style::default().fg(Color::Cyan)),
+                Cell::from(format!("${:.0}", cumulative_cost))
+                    .style(Style::default().fg(Color::Cyan)),
             ])
         })
         .collect();

@@ -1,8 +1,8 @@
-use reqwest::Client;
-use chrono::{DateTime, Utc};
-use tokio::time::{sleep, Duration};
-use crate::models::{PolymarketEvent, TargetMarket, Market};
+use crate::models::{Market, PolymarketEvent, TargetMarket};
 use anyhow::Result;
+use chrono::{DateTime, Utc};
+use reqwest::Client;
+use tokio::time::{sleep, Duration};
 use tracing::{info, warn};
 
 pub struct AutoScanner {
@@ -24,7 +24,10 @@ impl AutoScanner {
         min_m: f64,
         max_m: f64,
     ) -> Option<TargetMarket> {
-        info!("🔍 Авто-поиск {} (окно: {}-{} мин)", target_prefix, min_m, max_m);
+        info!(
+            "🔍 Авто-поиск {} (окно: {}-{} мин)",
+            target_prefix, min_m, max_m
+        );
 
         loop {
             match self.perform_scan(target_prefix, min_m, max_m).await {
@@ -47,7 +50,9 @@ impl AutoScanner {
         let limit = 500;
 
         loop {
-            let response = self.client.get(&self.api_url)
+            let response = self
+                .client
+                .get(&self.api_url)
                 .query(&[
                     ("active", "true"),
                     ("closed", "false"),
@@ -76,10 +81,16 @@ impl AutoScanner {
                 return Ok(None);
             }
 
-            info!("📡 Загружено {} событий (offset: {}). Сеть: {:?} | Парсинг: {:?}",
-                events.len(), offset, network_time, parse_time);
+            info!(
+                "📡 Загружено {} событий (offset: {}). Сеть: {:?} | Парсинг: {:?}",
+                events.len(),
+                offset,
+                network_time,
+                parse_time
+            );
 
-            let target = events.into_iter()
+            let target = events
+                .into_iter()
                 .filter(|e| e.active && e.slug.starts_with(prefix))
                 .filter_map(|e| self.process_event(e, min_m, max_m))
                 .next();
