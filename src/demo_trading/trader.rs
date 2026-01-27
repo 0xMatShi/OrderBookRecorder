@@ -1,3 +1,16 @@
+//! Trading strategy implementation for Polymarket order book demo trading.
+//!
+//! # Strategy Overview
+//!
+//! The strategy consists of two legs:
+//! 1. **First leg (strong side)**: Place limit order on the side with best_bid >= 0.5
+//! 2. **Second leg (opposite side)**: After first leg fills, place opposite side order
+//!
+//! ## Second Leg Logic
+//!
+//! When first leg is filled at `first_side_price`, the second leg is placed as a limit order
+//! at `target_price = 0.99 - first_side_price`.
+
 use crate::models::Recording;
 use crate::replay::player::SPEEDS;
 use chrono::{TimeZone, Utc};
@@ -6,8 +19,9 @@ use std::time::Instant;
 
 const INITIAL_BALANCE: f64 = 5000.0;
 const ORDER_SIZE: f64 = 1.0; // Number of shares per order
-const SIZE_THRESHOLD: f64 = 100.0; // Place orders when both best_bid sizes < threshold
-const SECOND_LEVEL_THRESHOLD: f64 = 5000.0; // Sum of levels 2-6 must be >= this size
+const SIZE_THRESHOLD: f64 = 10.0; // Place orders when both best_bid sizes < threshold
+const SECOND_LEVEL_THRESHOLD: f64 = 500.0; // Level 2 bid size must be >= this size
+const THIRD_SIXTH_LEVEL_THRESHOLD: f64 = 2000.0; // Sum of levels 3-6 must be >= this size
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Outcome {
@@ -32,6 +46,7 @@ pub struct Order {
     pub size: f64,
     pub filled: f64,
     pub placed_at_tick: usize,
+    pub is_second_leg: bool, // Track if this is a second leg order
 }
 
 impl Order {
@@ -182,7 +197,6 @@ fn process_tick_logic(
     // Step 1: Check order fills
     let up_best_bid = tick.up_bids.first().map(|b| b[0]).unwrap_or(0.0);
     let down_best_bid = tick.down_bids.first().map(|b| b[0]).unwrap_or(0.0);
-
     let mut filled_indices = Vec::new();
     for (i, order) in open_orders.iter().enumerate() {
         let best_bid = match order.outcome {
@@ -218,11 +232,15 @@ fn process_tick_logic(
     let up_best_bid_price = tick.up_bids.first().map(|b| b[0]).unwrap_or(0.0);
     let down_best_bid_price = tick.down_bids.first().map(|b| b[0]).unwrap_or(0.0);
 
-    // Sum of levels 2-6 (indices 1-5)
-    let up_levels_2_to_6_size: f64 = tick.up_bids.iter().skip(1).take(5).map(|b| b[1]).sum();
-    let down_levels_2_to_6_size: f64 = tick.down_bids.iter().skip(1).take(5).map(|b| b[1]).sum();
+    // Level 2 size (index 1)
+    let up_level_2_size: f64 = tick.up_bids.get(1).map(|b| b[1]).unwrap_or(0.0);
+    let down_level_2_size: f64 = tick.down_bids.get(1).map(|b| b[1]).unwrap_or(0.0);
 
-    // Place pending opposite orders
+    // Sum of levels 3-6 (indices 2-5)
+    let up_levels_3_to_6_size: f64 = tick.up_bids.iter().skip(2).take(4).map(|b| b[1]).sum();
+    let down_levels_3_to_6_size: f64 = tick.down_bids.iter().skip(2).take(4).map(|b| b[1]).sum();
+
+    // Place pending opposite orders (second leg)
     if !pending_opposite_orders.is_empty() {
         let pending = pending_opposite_orders.clone();
         pending_opposite_orders.clear();
@@ -233,16 +251,20 @@ fn process_tick_logic(
                 Outcome::Down => Outcome::Up,
             };
 
-            let price = 0.99 - first_side_price;
-            if price > 0.0 && price < 1.0 {
-                open_orders.push(Order {
-                    outcome: opposite_side,
-                    price,
-                    size: ORDER_SIZE,
-                    filled: 0.0,
-                    placed_at_tick: tick_idx,
-                });
+            let target_price = 0.99 - first_side_price;
+            if target_price <= 0.0 || target_price >= 1.0 {
+                continue;
             }
+
+            // Place limit order at target_price
+            open_orders.push(Order {
+                outcome: opposite_side,
+                price: target_price,
+                size: ORDER_SIZE,
+                filled: 0.0,
+                placed_at_tick: tick_idx,
+                is_second_leg: true,
+            });
         }
     }
 
@@ -256,12 +278,18 @@ fn process_tick_logic(
     };
 
     if let Some(side) = strong_side {
-        let (price, best_size, levels_2_to_6_size) = match side {
-            Outcome::Up => (up_best_bid_price, up_best_bid_size, up_levels_2_to_6_size),
+        let (price, best_size, level_2_size, levels_3_to_6_size) = match side {
+            Outcome::Up => (
+                up_best_bid_price,
+                up_best_bid_size,
+                up_level_2_size,
+                up_levels_3_to_6_size,
+            ),
             Outcome::Down => (
                 down_best_bid_price,
                 down_best_bid_size,
-                down_levels_2_to_6_size,
+                down_level_2_size,
+                down_levels_3_to_6_size,
             ),
         };
 
@@ -269,7 +297,8 @@ fn process_tick_logic(
 
         if !placed_first_order_prices.contains(&price_key)
             && best_size < SIZE_THRESHOLD
-            && levels_2_to_6_size >= SECOND_LEVEL_THRESHOLD
+            && level_2_size >= SECOND_LEVEL_THRESHOLD
+            && levels_3_to_6_size >= THIRD_SIXTH_LEVEL_THRESHOLD
             && price > 0.0
         {
             let has_open_order_at_price = open_orders
@@ -283,6 +312,7 @@ fn process_tick_logic(
                     size: ORDER_SIZE,
                     filled: 0.0,
                     placed_at_tick: tick_idx,
+                    is_second_leg: false,
                 });
                 placed_first_order_prices.insert(price_key);
             }
