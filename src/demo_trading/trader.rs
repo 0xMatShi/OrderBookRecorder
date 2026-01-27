@@ -7,7 +7,7 @@ use std::time::Instant;
 const INITIAL_BALANCE: f64 = 5000.0;
 const ORDER_SIZE: f64 = 1.0; // Number of shares per order
 const SIZE_THRESHOLD: f64 = 100.0; // Place orders when both best_bid sizes < threshold
-const SECOND_LEVEL_THRESHOLD: f64 = 1500.0; // Second level bids must be > this size
+const SECOND_LEVEL_THRESHOLD: f64 = 5000.0; // Sum of levels 2-6 must be >= this size
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Outcome {
@@ -168,6 +168,128 @@ pub struct EventResult {
     pub pnl: f64, // winner_shares - total_spent
 }
 
+/// Process a single tick's trading logic
+/// This is the core strategy logic used by both calculate_event_result and DemoTradingState
+fn process_tick_logic(
+    tick: &crate::models::Tick,
+    tick_idx: usize,
+    portfolio: &mut Portfolio,
+    open_orders: &mut Vec<Order>,
+    trade_history: &mut Vec<Trade>,
+    placed_first_order_prices: &mut HashSet<PriceKey>,
+    pending_opposite_orders: &mut Vec<(Outcome, f64)>,
+) {
+    // Step 1: Check order fills
+    let up_best_bid = tick.up_bids.first().map(|b| b[0]).unwrap_or(0.0);
+    let down_best_bid = tick.down_bids.first().map(|b| b[0]).unwrap_or(0.0);
+
+    let mut filled_indices = Vec::new();
+    for (i, order) in open_orders.iter().enumerate() {
+        let best_bid = match order.outcome {
+            Outcome::Up => up_best_bid,
+            Outcome::Down => down_best_bid,
+        };
+
+        if best_bid < order.price && best_bid > 0.0 {
+            let trade = Trade {
+                outcome: order.outcome,
+                price: order.price,
+                size: order.size,
+                executed_at_tick: tick_idx,
+            };
+            portfolio.execute_trade(&trade);
+            trade_history.push(trade);
+            filled_indices.push(i);
+
+            let price_key = PriceKey::new(order.outcome, order.price);
+            if placed_first_order_prices.remove(&price_key) {
+                pending_opposite_orders.push((order.outcome, order.price));
+            }
+        }
+    }
+
+    for &i in filled_indices.iter().rev() {
+        open_orders.remove(i);
+    }
+
+    // Step 2: Check order placement
+    let up_best_bid_size = tick.up_bids.first().map(|b| b[1]).unwrap_or(0.0);
+    let down_best_bid_size = tick.down_bids.first().map(|b| b[1]).unwrap_or(0.0);
+    let up_best_bid_price = tick.up_bids.first().map(|b| b[0]).unwrap_or(0.0);
+    let down_best_bid_price = tick.down_bids.first().map(|b| b[0]).unwrap_or(0.0);
+
+    // Sum of levels 2-6 (indices 1-5)
+    let up_levels_2_to_6_size: f64 = tick.up_bids.iter().skip(1).take(5).map(|b| b[1]).sum();
+    let down_levels_2_to_6_size: f64 = tick.down_bids.iter().skip(1).take(5).map(|b| b[1]).sum();
+
+    // Place pending opposite orders
+    if !pending_opposite_orders.is_empty() {
+        let pending = pending_opposite_orders.clone();
+        pending_opposite_orders.clear();
+
+        for (first_side, first_side_price) in pending {
+            let opposite_side = match first_side {
+                Outcome::Up => Outcome::Down,
+                Outcome::Down => Outcome::Up,
+            };
+
+            let price = 0.99 - first_side_price;
+            if price > 0.0 && price < 1.0 {
+                open_orders.push(Order {
+                    outcome: opposite_side,
+                    price,
+                    size: ORDER_SIZE,
+                    filled: 0.0,
+                    placed_at_tick: tick_idx,
+                });
+            }
+        }
+    }
+
+    // Place first orders
+    let strong_side = if up_best_bid_price >= 0.5 {
+        Some(Outcome::Up)
+    } else if down_best_bid_price >= 0.5 {
+        Some(Outcome::Down)
+    } else {
+        None
+    };
+
+    if let Some(side) = strong_side {
+        let (price, best_size, levels_2_to_6_size) = match side {
+            Outcome::Up => (up_best_bid_price, up_best_bid_size, up_levels_2_to_6_size),
+            Outcome::Down => (
+                down_best_bid_price,
+                down_best_bid_size,
+                down_levels_2_to_6_size,
+            ),
+        };
+
+        let price_key = PriceKey::new(side, price);
+
+        if !placed_first_order_prices.contains(&price_key)
+            && best_size < SIZE_THRESHOLD
+            && levels_2_to_6_size >= SECOND_LEVEL_THRESHOLD
+            && price > 0.0
+        {
+            let has_open_order_at_price = open_orders
+                .iter()
+                .any(|o| o.outcome == side && (o.price - price).abs() < 0.01);
+
+            if !has_open_order_at_price {
+                open_orders.push(Order {
+                    outcome: side,
+                    price,
+                    size: ORDER_SIZE,
+                    filled: 0.0,
+                    placed_at_tick: tick_idx,
+                });
+                placed_first_order_prices.insert(price_key);
+            }
+        }
+    }
+}
+
 pub struct DemoTradingState {
     pub recording: Recording,
     pub current_tick: usize,
@@ -212,117 +334,17 @@ pub fn calculate_event_result(recording: &Recording) -> EventResult {
     let mut placed_first_order_prices: HashSet<PriceKey> = HashSet::new();
     let mut pending_opposite_orders: Vec<(Outcome, f64)> = Vec::new();
 
-    // Process all ticks
+    // Process all ticks using shared logic
     for (tick_idx, tick) in recording.ticks.iter().enumerate() {
-        // Check order fills
-        let up_best_bid = tick.up_bids.first().map(|b| b[0]).unwrap_or(0.0);
-        let down_best_bid = tick.down_bids.first().map(|b| b[0]).unwrap_or(0.0);
-
-        let mut filled_indices = Vec::new();
-        for (i, order) in open_orders.iter().enumerate() {
-            let best_bid = match order.outcome {
-                Outcome::Up => up_best_bid,
-                Outcome::Down => down_best_bid,
-            };
-
-            if best_bid < order.price && best_bid > 0.0 {
-                let trade = Trade {
-                    outcome: order.outcome,
-                    price: order.price,
-                    size: order.size,
-                    executed_at_tick: tick_idx,
-                };
-                portfolio.execute_trade(&trade);
-                trade_history.push(trade);
-                filled_indices.push(i);
-
-                let price_key = PriceKey::new(order.outcome, order.price);
-                if placed_first_order_prices.remove(&price_key) {
-                    pending_opposite_orders.push((order.outcome, order.price));
-                }
-            }
-        }
-
-        for &i in filled_indices.iter().rev() {
-            open_orders.remove(i);
-        }
-
-        // Check order placement
-        let up_best_bid_size = tick.up_bids.first().map(|b| b[1]).unwrap_or(0.0);
-        let down_best_bid_size = tick.down_bids.first().map(|b| b[1]).unwrap_or(0.0);
-        let up_best_bid_price = tick.up_bids.first().map(|b| b[0]).unwrap_or(0.0);
-        let down_best_bid_price = tick.down_bids.first().map(|b| b[0]).unwrap_or(0.0);
-
-        let up_second_bid_size = tick.up_bids.get(1).map(|b| b[1]).unwrap_or(0.0);
-        let down_second_bid_size = tick.down_bids.get(1).map(|b| b[1]).unwrap_or(0.0);
-
-        // Place pending opposite orders
-        if !pending_opposite_orders.is_empty() {
-            let pending = pending_opposite_orders.clone();
-            pending_opposite_orders.clear();
-
-            for (first_side, first_side_price) in pending {
-                let opposite_side = match first_side {
-                    Outcome::Up => Outcome::Down,
-                    Outcome::Down => Outcome::Up,
-                };
-
-                let price = 0.99 - first_side_price;
-                if price > 0.0 && price < 1.0 {
-                    open_orders.push(Order {
-                        outcome: opposite_side,
-                        price,
-                        size: ORDER_SIZE,
-                        filled: 0.0,
-                        placed_at_tick: tick_idx,
-                    });
-                }
-            }
-        }
-
-        // Place first orders
-        let strong_side = if up_best_bid_price >= 0.5 {
-            Some(Outcome::Up)
-        } else if down_best_bid_price >= 0.5 {
-            Some(Outcome::Down)
-        } else {
-            None
-        };
-
-        if let Some(side) = strong_side {
-            let (price, best_size, second_size) = match side {
-                Outcome::Up => (up_best_bid_price, up_best_bid_size, up_second_bid_size),
-                Outcome::Down => (
-                    down_best_bid_price,
-                    down_best_bid_size,
-                    down_second_bid_size,
-                ),
-            };
-
-            let price_key = PriceKey::new(side, price);
-
-            // Check only strong side conditions, no checks for weak side
-            if !placed_first_order_prices.contains(&price_key)
-                && best_size < SIZE_THRESHOLD
-                && second_size > SECOND_LEVEL_THRESHOLD
-                && price > 0.0
-            {
-                let has_open_order_at_price = open_orders
-                    .iter()
-                    .any(|o| o.outcome == side && (o.price - price).abs() < 0.01);
-
-                if !has_open_order_at_price {
-                    open_orders.push(Order {
-                        outcome: side,
-                        price,
-                        size: ORDER_SIZE,
-                        filled: 0.0,
-                        placed_at_tick: tick_idx,
-                    });
-                    placed_first_order_prices.insert(price_key);
-                }
-            }
-        }
+        process_tick_logic(
+            tick,
+            tick_idx,
+            &mut portfolio,
+            &mut open_orders,
+            &mut trade_history,
+            &mut placed_first_order_prices,
+            &mut pending_opposite_orders,
+        );
     }
 
     // Determine winner from last tick
@@ -345,7 +367,16 @@ pub fn calculate_event_result(recording: &Recording) -> EventResult {
     let pnl = match winner {
         Some(Outcome::Up) => portfolio.up_shares - total_spent,
         Some(Outcome::Down) => portfolio.down_shares - total_spent,
-        None => -total_spent, // Lost everything if no winner
+        None => {
+            // When winner is unclear (both bids < 0.5)
+            // If equal shares, one side will definitely win and we get that amount back
+            // If unequal, we don't know which side wins, so assume loss
+            if portfolio.up_shares == portfolio.down_shares {
+                portfolio.up_shares - total_spent
+            } else {
+                -total_spent
+            }
+        }
     };
 
     EventResult {
@@ -507,7 +538,16 @@ impl DemoTradingState {
         let pnl = match winner {
             Some(Outcome::Up) => self.portfolio.up_shares - total_spent,
             Some(Outcome::Down) => self.portfolio.down_shares - total_spent,
-            None => -total_spent,
+            None => {
+                // When winner is unclear (both bids < 0.5)
+                // If equal shares, one side will definitely win and we get that amount back
+                // If unequal, we don't know which side wins, so assume loss
+                if self.portfolio.up_shares == self.portfolio.down_shares {
+                    self.portfolio.up_shares - total_spent
+                } else {
+                    -total_spent
+                }
+            }
         };
 
         self.final_result = Some(EventResult {
@@ -551,7 +591,7 @@ impl DemoTradingState {
     /// Fast-forward to a specific quarter (1-4) of the recording
     /// Uses precalculated snapshots for instant seeking
     pub fn jump_to_quarter(&mut self, quarter: u8) {
-        if quarter < 1 || quarter > 4 || self.recording.ticks.is_empty() {
+        if !(1..=4).contains(&quarter) || self.recording.ticks.is_empty() {
             return;
         }
 
@@ -635,139 +675,16 @@ impl DemoTradingState {
         // Clone tick data to avoid borrow checker issues
         let tick = self.recording.ticks[self.current_tick].clone();
 
-        // Check for order fills
-        self.check_order_fills(&tick);
-
-        // Check for new order placement conditions
-        self.check_order_placement(&tick);
-    }
-
-    fn check_order_fills(&mut self, tick: &crate::models::Tick) {
-        let up_best_bid = tick.up_bids.first().map(|b| b[0]).unwrap_or(0.0);
-        let down_best_bid = tick.down_bids.first().map(|b| b[0]).unwrap_or(0.0);
-
-        let mut filled_indices = Vec::new();
-
-        for (i, order) in self.open_orders.iter().enumerate() {
-            let best_bid = match order.outcome {
-                Outcome::Up => up_best_bid,
-                Outcome::Down => down_best_bid,
-            };
-
-            // Order is filled if best_bid < order price
-            if best_bid < order.price && best_bid > 0.0 {
-                let trade = Trade {
-                    outcome: order.outcome,
-                    price: order.price,
-                    size: order.size,
-                    executed_at_tick: self.current_tick,
-                };
-
-                self.portfolio.execute_trade(&trade);
-                self.trade_history.push(trade);
-                filled_indices.push(i);
-
-                // Check if this was a first order (strong side) - add to pending opposite orders
-                let price_key = PriceKey::new(order.outcome, order.price);
-                if self.placed_first_order_prices.remove(&price_key) {
-                    // Remove from tracking so we can place new orders at this price if conditions arise again
-                    self.pending_opposite_orders
-                        .push((order.outcome, order.price));
-                }
-            }
-        }
-
-        // Remove filled orders (in reverse to maintain indices)
-        for &i in filled_indices.iter().rev() {
-            self.open_orders.remove(i);
-        }
-    }
-
-    fn check_order_placement(&mut self, tick: &crate::models::Tick) {
-        // First level (best bid)
-        let up_best_bid_size = tick.up_bids.first().map(|b| b[1]).unwrap_or(0.0);
-        let down_best_bid_size = tick.down_bids.first().map(|b| b[1]).unwrap_or(0.0);
-        let up_best_bid_price = tick.up_bids.first().map(|b| b[0]).unwrap_or(0.0);
-        let down_best_bid_price = tick.down_bids.first().map(|b| b[0]).unwrap_or(0.0);
-
-        // Second level bids
-        let up_second_bid_size = tick.up_bids.get(1).map(|b| b[1]).unwrap_or(0.0);
-        let down_second_bid_size = tick.down_bids.get(1).map(|b| b[1]).unwrap_or(0.0);
-
-        // Step 1: Check for pending opposite orders (second orders after first filled)
-        if !self.pending_opposite_orders.is_empty() {
-            let pending = self.pending_opposite_orders.clone();
-            self.pending_opposite_orders.clear();
-
-            for (first_side, first_side_price) in pending {
-                let opposite_side = match first_side {
-                    Outcome::Up => Outcome::Down,
-                    Outcome::Down => Outcome::Up,
-                };
-
-                // Calculate second order price as 0.99 - first_side_price
-                let price = 0.99 - first_side_price;
-
-                // Place opposite order without conditions
-                if price > 0.0 && price < 1.0 {
-                    self.open_orders.push(Order {
-                        outcome: opposite_side,
-                        price,
-                        size: ORDER_SIZE,
-                        filled: 0.0,
-                        placed_at_tick: self.current_tick,
-                    });
-                }
-            }
-        }
-
-        // Step 2: Look for new first order opportunities on strong side (best_bid >= 0.5)
-        // Determine strong side
-        let strong_side = if up_best_bid_price >= 0.5 {
-            Some(Outcome::Up)
-        } else if down_best_bid_price >= 0.5 {
-            Some(Outcome::Down)
-        } else {
-            None
-        };
-
-        if let Some(side) = strong_side {
-            let (price, best_size, second_size) = match side {
-                Outcome::Up => (up_best_bid_price, up_best_bid_size, up_second_bid_size),
-                Outcome::Down => (
-                    down_best_bid_price,
-                    down_best_bid_size,
-                    down_second_bid_size,
-                ),
-            };
-
-            let price_key = PriceKey::new(side, price);
-
-            // Check only strong side conditions, no checks for weak side
-            if !self.placed_first_order_prices.contains(&price_key)
-                && best_size < SIZE_THRESHOLD
-                && second_size > SECOND_LEVEL_THRESHOLD
-                && price > 0.0
-            {
-                // Check if we don't already have an open order at this price
-                // Use same precision as PriceKey (0.01 = 1 cent)
-                let has_open_order_at_price = self
-                    .open_orders
-                    .iter()
-                    .any(|o| o.outcome == side && (o.price - price).abs() < 0.01);
-
-                if !has_open_order_at_price {
-                    self.open_orders.push(Order {
-                        outcome: side,
-                        price,
-                        size: ORDER_SIZE,
-                        filled: 0.0,
-                        placed_at_tick: self.current_tick,
-                    });
-                    self.placed_first_order_prices.insert(price_key);
-                }
-            }
-        }
+        // Use shared logic
+        process_tick_logic(
+            &tick,
+            self.current_tick,
+            &mut self.portfolio,
+            &mut self.open_orders,
+            &mut self.trade_history,
+            &mut self.placed_first_order_prices,
+            &mut self.pending_opposite_orders,
+        );
     }
 
     pub fn current_time_str(&self) -> String {

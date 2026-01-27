@@ -188,9 +188,9 @@ fn demo_trading_mode() -> Result<()> {
 
     println!("=== Available Recordings ===");
     println!("Calculating results...\n");
-    
+
     let mut all_results = Vec::new();
-    
+
     for (i, path) in recordings.iter().enumerate() {
         let metadata = RecordingStorage::load_metadata(path);
         match metadata {
@@ -204,21 +204,30 @@ fn demo_trading_mode() -> Result<()> {
                             Some(crate::demo_trading::Outcome::Down) => "DOWN",
                             None => "NONE",
                         };
-                        
+
                         let pnl_color = if result.pnl > 0.0 { "+" } else { "" };
                         let result_str = format!(
                             " (Up: {:.2} sh | Down: {:.2} sh | Spent: ${:.2} | Winner: {} | PnL: {}{:.2})",
                             result.up_shares, result.down_shares, result.total_spent, winner_str, pnl_color, result.pnl
                         );
-                        
-                        println!("{}. {} ({} ticks){}", 
-                            i + 1, m.display_name(), m.total_ticks, result_str);
-                        
+
+                        println!(
+                            "{}. {} ({} ticks){}",
+                            i + 1,
+                            m.display_name(),
+                            m.total_ticks,
+                            result_str
+                        );
+
                         all_results.push(result);
                     }
                     Err(_) => {
-                        println!("{}. {} ({} ticks) (error calculating)", 
-                            i + 1, m.display_name(), m.total_ticks);
+                        println!(
+                            "{}. {} ({} ticks) (error calculating)",
+                            i + 1,
+                            m.display_name(),
+                            m.total_ticks
+                        );
                     }
                 };
             }
@@ -231,14 +240,20 @@ fn demo_trading_mode() -> Result<()> {
             }
         }
     }
-    
+
     // Calculate and display statistics
-    if !all_results.is_empty() {
-        let total_pnl: f64 = all_results.iter().map(|r| r.pnl).sum();
-        let wins = all_results.iter().filter(|r| r.pnl > 0.0).count();
-        let total = all_results.len();
+    // Filter out events where no trades were made (total_spent == 0) or where pnl == 0
+    let traded_results: Vec<&crate::demo_trading::EventResult> = all_results
+        .iter()
+        .filter(|r| r.total_spent > 0.0 && r.pnl != 0.0)
+        .collect();
+
+    if !traded_results.is_empty() {
+        let total_pnl: f64 = traded_results.iter().map(|r| r.pnl).sum();
+        let wins = traded_results.iter().filter(|r| r.pnl > 0.0).count();
+        let total = traded_results.len();
         let winrate = (wins as f64 / total as f64) * 100.0;
-        
+
         println!("\n=== Statistics ===");
         println!("Total PnL: ${:.2}", total_pnl);
         println!("Winrate: {:.1}% ({}/{})", winrate, wins, total);
