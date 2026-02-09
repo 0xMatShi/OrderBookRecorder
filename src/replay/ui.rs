@@ -98,11 +98,21 @@ fn draw_info_panel(frame: &mut Frame, state: &ReplayState, area: Rect) {
     };
     let speed_str = format!("{}x", SPEEDS[state.speed_index]);
 
-    let tick_info = format!(
-        "{} / {}",
-        state.current_tick + 1,
-        state.recording.ticks.len()
-    );
+    let tick_info = if state.price_change_count > 0 {
+        format!(
+            "{} / {} (book: {} | pc: {})",
+            state.current_tick + 1,
+            state.recording.ticks.len(),
+            state.book_count,
+            state.price_change_count,
+        )
+    } else {
+        format!(
+            "{} / {}",
+            state.current_tick + 1,
+            state.recording.ticks.len(),
+        )
+    };
 
     let time_info = format!("{} / {}", state.current_time_str(), state.total_time_str());
 
@@ -179,6 +189,16 @@ fn draw_keys_panel(frame: &mut Frame, area: Rect) {
             Span::styled("q", Style::default().fg(Color::Cyan)),
             Span::raw(" - Quit"),
         ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Δ Colors: ", Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(vec![
+            Span::styled("Magenta", Style::default().fg(Color::Magenta)),
+            Span::raw("-Fill "),
+            Span::styled("Red", Style::default().fg(Color::Red)),
+            Span::raw("-Cancel"),
+        ]),
     ];
 
     let paragraph =
@@ -188,32 +208,119 @@ fn draw_keys_panel(frame: &mut Frame, area: Rect) {
 }
 
 fn draw_order_book(frame: &mut Frame, state: &ReplayState, area: Rect, is_up: bool) {
-    let title = if is_up { " UP Bids " } else { " DOWN Bids " };
+    let base_title = if is_up { " UP Bids " } else { " DOWN Bids " };
     let title_color = if is_up { Color::Green } else { Color::Red };
 
-    let bids = if state.recording.ticks.is_empty() {
-        &vec![]
+    // Определяем источник текущего тика (Book = трейд, PriceChange = изменение ордеров)
+    let (is_from_book, source_label) = if !state.recording.tick_sources.is_empty()
+        && state.current_tick < state.recording.tick_sources.len()
+    {
+        let is_book = state.recording.tick_sources[state.current_tick] == crate::models::TickSource::Book;
+        let label = if is_book { "[BOOK]" } else { "[PC]" };
+        (is_book, label)
+    } else {
+        (false, "")
+    };
+
+    let title = format!("{}{}", base_title, source_label);
+
+    let empty_bids: Vec<[f64; 2]> = Vec::new();
+    let (bids, prev_bids) = if state.recording.ticks.is_empty() {
+        (&empty_bids, &empty_bids)
     } else {
         let tick = &state.recording.ticks[state.current_tick];
-        if is_up {
+        let current = if is_up {
             &tick.up_bids
         } else {
             &tick.down_bids
+        };
+        if state.current_tick > 0 {
+            let prev_tick = &state.recording.ticks[state.current_tick - 1];
+            let prev = if is_up {
+                &prev_tick.up_bids
+            } else {
+                &prev_tick.down_bids
+            };
+            (current, prev)
+        } else {
+            (current, &empty_bids)
         }
     };
+
+    // Критический паттерн: price_change + book с одинаковым timestamp = трейд
+    // Когда price_change и book приходят одновременно, price_change показывает
+    // конкретные уровни цен, которые были затронуты трейдом.
+    // Это наблюдается в 100% случаев трейдов.
+    let current_ts = if !state.recording.ticks.is_empty() {
+        state.recording.ticks[state.current_tick].ts
+    } else {
+        0
+    };
+
+    let outcome_filter = if is_up { "up" } else { "down" };
+
+    // Собираем price_change события для текущего timestamp
+    let current_price_changes: Vec<_> = state
+        .recording
+        .price_changes
+        .iter()
+        .filter(|pc| pc.ts == current_ts)
+        .flat_map(|pc| &pc.changes)
+        .filter(|c| c.outcome == outcome_filter)
+        .collect();
+
+    // Собираем цены, которые были затронуты price_change
+    let filled_prices: std::collections::HashSet<String> = current_price_changes
+        .iter()
+        .map(|c| format!("{:.2}", c.price))
+        .collect();
+
+    // Собираем удаленные уровни (size=0) для отображения "фантомных" уровней
+    let deleted_levels: Vec<f64> = current_price_changes
+        .iter()
+        .filter(|c| c.size == 0.0)
+        .map(|c| c.price)
+        .collect();
 
     let header = Row::new(vec![
         Cell::from("#").style(Style::default().fg(Color::Gray)),
         Cell::from("Price").style(Style::default().fg(Color::Gray)),
         Cell::from("Size").style(Style::default().fg(Color::Gray)),
+        Cell::from("Δ").style(Style::default().fg(Color::Gray)),
         Cell::from("Cost($)").style(Style::default().fg(Color::Gray)),
     ])
     .height(1)
     .bottom_margin(1);
 
+    // Создаем комбинированный список: существующие bids + фантомные уровни (size=0)
+    //
+    // Когда агрессивный трейд съедает весь уровень, приходит price_change с size=0
+    // и этот уровень удаляется из snapshot. Но для анализа критично видеть эти уровни!
+    //
+    // Пример: трейд съел 0.74 (было 15) и зацепил 0.73 (было 20, стало 10):
+    //   price_change: [{"price":0.74,"size":0}, {"price":0.73,"size":10}] ts=1000
+    //   tick: [[0.73,10], [0.72,50], ...] ts=1000
+    //
+    // Replay покажет:
+    //   0.74 | 0  | -15  (Magenta) <- фантомный уровень
+    //   0.73 | 10 | -10  (Magenta)
+    //   0.72 | 50 | ·
+    let mut combined_levels: Vec<[f64; 2]> = bids.to_vec();
+
+    // Добавляем фантомные уровни (удаленные)
+    for deleted_price in &deleted_levels {
+        // Проверяем что этого уровня нет в текущих bids
+        if !bids.iter().any(|b| (b[0] - deleted_price).abs() < 1e-9) {
+            combined_levels.push([*deleted_price, 0.0]);
+        }
+    }
+
+    // Сортируем по цене (descending)
+    combined_levels.sort_by(|a, b| b[0].partial_cmp(&a[0]).unwrap_or(std::cmp::Ordering::Equal));
+
     // Calculate cumulative costs
     let mut cumulative_cost = 0.0;
-    let rows: Vec<Row> = bids
+    let rows: Vec<Row> = combined_levels
         .iter()
         .enumerate()
         .map(|(i, bid)| {
@@ -221,10 +328,39 @@ fn draw_order_book(frame: &mut Frame, state: &ReplayState, area: Rect, is_up: bo
             let size = bid[1];
             cumulative_cost += price * size;
 
+            // Compute delta
+            let (delta_str, delta_color) = if prev_bids.is_empty() {
+                ("·".to_string(), Color::DarkGray)
+            } else if let Some(prev_level) = prev_bids.iter().find(|b| (b[0] - price).abs() < 1e-9)
+            {
+                let diff = size - prev_level[1];
+                if diff.abs() < 0.5 {
+                    ("·".to_string(), Color::DarkGray)
+                } else if diff > 0.0 {
+                    (format!("+{:.0}", diff), Color::Green)
+                } else {
+                    // Размер уменьшился
+                    // Проверяем: есть ли price_change с текущим timestamp для этой цены?
+                    // Если да - это FILL (трейд), иначе - CANCEL (отмена ордера)
+                    let price_str = format!("{:.2}", price);
+                    let is_fill = is_from_book || filled_prices.contains(&price_str);
+
+                    let color = if is_fill {
+                        Color::Magenta // FILL (трейд)
+                    } else {
+                        Color::Red // CANCEL (отмена ордера)
+                    };
+                    (format!("{:.0}", diff), color)
+                }
+            } else {
+                ("NEW".to_string(), Color::Cyan)
+            };
+
             Row::new(vec![
                 Cell::from(format!("{}", i + 1)).style(Style::default().fg(Color::DarkGray)),
                 Cell::from(format!("{:.2}", price)).style(Style::default().fg(Color::White)),
                 Cell::from(format!("{:.0}", size)).style(Style::default().fg(Color::Yellow)),
+                Cell::from(delta_str).style(Style::default().fg(delta_color)),
                 Cell::from(format!("${:.0}", cumulative_cost))
                     .style(Style::default().fg(Color::Cyan)),
             ])
@@ -237,6 +373,7 @@ fn draw_order_book(frame: &mut Frame, state: &ReplayState, area: Rect, is_up: bo
             Constraint::Length(3),
             Constraint::Length(6),
             Constraint::Length(8),
+            Constraint::Length(7),
             Constraint::Min(8),
         ],
     )

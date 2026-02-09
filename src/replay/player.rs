@@ -11,10 +11,14 @@ pub struct ReplayState {
     pub speed_index: usize,
     pub last_frame_time: Instant,
     pub accumulated_time_ms: f64,
+    pub book_count: usize,
+    pub price_change_count: usize,
 }
 
 impl ReplayState {
     pub fn new(recording: Recording) -> Self {
+        let book_count = recording.book_count();
+        let price_change_count = recording.price_change_count();
         Self {
             recording,
             current_tick: 0,
@@ -22,6 +26,8 @@ impl ReplayState {
             speed_index: 3, // 1x speed
             last_frame_time: Instant::now(),
             accumulated_time_ms: 0.0,
+            book_count,
+            price_change_count,
         }
     }
 

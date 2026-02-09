@@ -2,3 +2,6 @@ target/
 .claude/
 example/
 recordings/
+fam/
+polymarket_websocket_market.md
+CLAUDE.md

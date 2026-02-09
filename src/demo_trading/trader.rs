@@ -1,15 +1,62 @@
 //! Trading strategy implementation for Polymarket order book demo trading.
 //!
-//! # Strategy Overview
+//! # Strategy Overview - Spread Closing Strategy
 //!
-//! The strategy consists of two legs:
-//! 1. **First leg (strong side)**: Place limit order on the side with best_bid >= 0.5
-//! 2. **Second leg (opposite side)**: After first leg fills, place opposite side order
+//! The strategy places limit orders on the "expensive" side (higher best_bid) when the
+//! spread opens due to price movement on the "decreasing" side.
 //!
-//! ## Second Leg Logic
+//! ## Terminology
+//! - `bbu` - best bid up (best bid price on Up side)
+//! - `bbd` - best bid down (best bid price on Down side)
+//! - Strong/Expensive side - the side with higher best_bid (>= 0.5)
+//! - Weak/Cheap side - the side with lower best_bid (< 0.5)
 //!
-//! When first leg is filled at `first_side_price`, the second leg is placed as a limit order
-//! at `target_price = 0.99 - first_side_price`.
+//! ## First Leg (Expensive Side) - Entry Condition
+//!
+//! Place limit order on the EXPENSIVE side when the WEAK side's best_bid decreases
+//! without the expensive side's best_bid changing. This creates a spread we want to close.
+//!
+//! Additional requirement: The second level (one cent below our target price) must have
+//! at least SECOND_LEVEL_MIN_SIZE shares to provide liquidity support.
+//!
+//! Example:
+//! - Tick 1: bbu=0.35, bbd=0.64
+//! - Tick 2: bbu=0.34, bbd=0.64 → bbu decreased, bbd unchanged
+//! - Target price = 0.99 - 0.34 = 0.65
+//! - Check: size at 0.64 level >= SECOND_LEVEL_MIN_SIZE? If yes, place order
+//!
+//! ## First Leg Fill Logic (Queue Position)
+//!
+//! We assume we're FIRST in queue at our target price. When the market reaches our
+//! target price, we wait for it to appear in the order book, then track the size.
+//! Once the size decreases by ORDER_SIZE, we consider ourselves filled.
+//!
+//! Example:
+//! - We want to place at 0.65
+//! - Next tick shows bbd=0.65 with size=10 → we "joined" at the front
+//! - Later tick shows size=3 (decreased by 7 >= ORDER_SIZE) → we're filled
+//! - But if size goes to 15 → not filled yet
+//! - If size goes from 15 to 14 (decreased by 1 >= ORDER_SIZE) → we're filled
+//!
+//! ## Second Leg (Weak Side) - After First Leg Fills
+//!
+//! When first leg fills, place order on weak side at current best_bid price.
+//! Track queue position: we're placed AFTER the current size at that price.
+//!
+//! IMPORTANT: Second leg can ONLY be filled in two cases:
+//! 1. Our order IS at best_bid AND enough shares cleared from queue
+//! 2. Best_bid dropped BELOW our price (entire level was bought out)
+//!
+//! If our order is at 0.46 but best_bid is 0.47, we're NOT first in queue
+//! and cannot get filled even if size at 0.46 decreases!
+//!
+//! Example:
+//! - First leg fills when bbd=0.65
+//! - At that moment, bbu (weak side) has size=100 at best_bid=0.34
+//! - We place order at 0.34 → we're position 101 in queue (after those 100 shares)
+//! - If best_bid moves to 0.35 → we're NOT at best_bid, cannot get filled
+//! - If best_bid drops to 0.33 → entire 0.34 level was bought, we're filled!
+//! - If best_bid stays at 0.34 and size drops by 101+ from peak → we're filled
 
 use crate::models::Recording;
 use crate::replay::player::SPEEDS;
@@ -19,9 +66,7 @@ use std::time::Instant;
 
 const INITIAL_BALANCE: f64 = 5000.0;
 const ORDER_SIZE: f64 = 1.0; // Number of shares per order
-const SIZE_THRESHOLD: f64 = 10.0; // Place orders when both best_bid sizes < threshold
-const SECOND_LEVEL_THRESHOLD: f64 = 500.0; // Level 2 bid size must be >= this size
-const THIRD_SIXTH_LEVEL_THRESHOLD: f64 = 2000.0; // Sum of levels 3-6 must be >= this size
+const SECOND_LEVEL_MIN_SIZE: f64 = 1000.0; // Minimum size required on second level to place first leg
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Outcome {
@@ -38,6 +83,18 @@ impl Outcome {
     }
 }
 
+/// Order state for tracking queue position and fill status
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OrderState {
+    /// Waiting for best_bid to reach our target price (we become the new best_bid)
+    WaitingForPrice,
+    /// We ARE the best_bid, tracking peak size to detect fill
+    /// Fill happens when best_bid drops BELOW our price
+    AtBestBid { peak_size: f64 },
+    /// Second leg: tracking queue position (we're after shares_ahead shares)
+    TrackingQueuePosition { shares_ahead: f64, peak_size: f64 },
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Order {
@@ -46,7 +103,10 @@ pub struct Order {
     pub size: f64,
     pub filled: f64,
     pub placed_at_tick: usize,
-    pub is_second_leg: bool, // Track if this is a second leg order
+    pub is_second_leg: bool,
+    pub second_leg_id: Option<u64>,
+    /// State machine for fill tracking
+    pub state: OrderState,
 }
 
 impl Order {
@@ -147,7 +207,7 @@ impl Portfolio {
     }
 }
 
-/// Price key for tracking placed orders
+/// Price key for tracking placed first leg orders (strong side)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct PriceKey {
     outcome: Outcome,
@@ -163,14 +223,22 @@ impl PriceKey {
     }
 }
 
+/// Tracks previous tick's best bid prices for detecting spread openings
+#[derive(Debug, Clone, Copy, Default)]
+struct PreviousBids {
+    bbu: f64, // previous best bid up
+    bbd: f64, // previous best bid down
+}
+
 /// Snapshot of trading state at a specific tick
 #[derive(Debug, Clone)]
 struct TickSnapshot {
     portfolio: Portfolio,
     open_orders: Vec<Order>,
     trade_history: Vec<Trade>,
-    placed_first_order_prices: HashSet<PriceKey>,
-    pending_opposite_orders: Vec<(Outcome, f64)>,
+    placed_first_leg_prices: HashSet<PriceKey>, // Track placed first leg orders (expensive side)
+    previous_bids: PreviousBids,                // Previous tick's best bids for spread detection
+    next_order_id: u64,                         // Counter for generating unique order IDs
 }
 
 /// Final result of the trading strategy
@@ -191,132 +259,373 @@ fn process_tick_logic(
     portfolio: &mut Portfolio,
     open_orders: &mut Vec<Order>,
     trade_history: &mut Vec<Trade>,
-    placed_first_order_prices: &mut HashSet<PriceKey>,
-    pending_opposite_orders: &mut Vec<(Outcome, f64)>,
+    placed_first_leg_prices: &mut HashSet<PriceKey>,
+    previous_bids: &mut PreviousBids,
+    next_order_id: &mut u64,
 ) {
-    // Step 1: Check order fills
-    let up_best_bid = tick.up_bids.first().map(|b| b[0]).unwrap_or(0.0);
-    let down_best_bid = tick.down_bids.first().map(|b| b[0]).unwrap_or(0.0);
+    // Extract market data
+    let bbu = tick.up_bids.first().map(|b| b[0]).unwrap_or(0.0); // best bid up
+    let bbd = tick.down_bids.first().map(|b| b[0]).unwrap_or(0.0); // best bid down
+    let bbu_size = tick.up_bids.first().map(|b| b[1]).unwrap_or(0.0);
+    let bbd_size = tick.down_bids.first().map(|b| b[1]).unwrap_or(0.0);
+
+    // Step 1: Process first leg orders - check fills and cancellations
     let mut filled_indices = Vec::new();
-    for (i, order) in open_orders.iter().enumerate() {
-        let best_bid = match order.outcome {
-            Outcome::Up => up_best_bid,
-            Outcome::Down => down_best_bid,
+    let mut cancelled_indices = Vec::new();
+    let mut new_second_legs: Vec<(Outcome, f64, f64)> = Vec::new(); // (weak_side, price, shares_ahead)
+
+    for (i, order) in open_orders.iter_mut().enumerate() {
+        let (best_bid_price, best_bid_size) = match order.outcome {
+            Outcome::Up => (bbu, bbu_size),
+            Outcome::Down => (bbd, bbd_size),
         };
 
-        if best_bid < order.price && best_bid > 0.0 {
-            let trade = Trade {
-                outcome: order.outcome,
-                price: order.price,
-                size: order.size,
-                executed_at_tick: tick_idx,
-            };
-            portfolio.execute_trade(&trade);
-            trade_history.push(trade);
-            filled_indices.push(i);
+        // Skip second leg orders in this section - they're handled separately
+        if order.is_second_leg {
+            continue;
+        }
 
-            let price_key = PriceKey::new(order.outcome, order.price);
-            if placed_first_order_prices.remove(&price_key) {
-                pending_opposite_orders.push((order.outcome, order.price));
+        match order.state {
+            OrderState::WaitingForPrice => {
+                // First leg: waiting for best_bid to reach our target price
+                // We become the new best_bid when price reaches our target
+
+                // Cancel if best_bid moved HIGHER than our price (someone else became new bb)
+                if best_bid_price > order.price + 0.001 {
+                    // Our order is now below best_bid - cancel it
+                    let price_key = PriceKey::new(order.outcome, order.price);
+                    placed_first_leg_prices.remove(&price_key);
+                    cancelled_indices.push(i);
+                    continue;
+                }
+
+                // Check if we became the best_bid
+                if (best_bid_price - order.price).abs() < 0.001 {
+                    // Price reached! We ARE the best_bid now
+                    order.state = OrderState::AtBestBid {
+                        peak_size: best_bid_size,
+                    };
+                }
+            }
+            OrderState::AtBestBid { peak_size } => {
+                // We are at best_bid (first in queue). Check for fill or cancellation.
+
+                // CANCEL: if best_bid moved HIGHER than our price
+                // (someone else placed order above us, we're no longer bb)
+                if best_bid_price > order.price + 0.001 {
+                    let price_key = PriceKey::new(order.outcome, order.price);
+                    placed_first_leg_prices.remove(&price_key);
+                    cancelled_indices.push(i);
+                    continue;
+                }
+
+                // Helper closure to execute fill
+                let execute_fill =
+                    |portfolio: &mut Portfolio,
+                     trade_history: &mut Vec<Trade>,
+                     placed_first_leg_prices: &mut HashSet<PriceKey>,
+                     new_second_legs: &mut Vec<(Outcome, f64, f64)>| {
+                        let trade = Trade {
+                            outcome: order.outcome,
+                            price: order.price,
+                            size: order.size,
+                            executed_at_tick: tick_idx,
+                        };
+                        portfolio.execute_trade(&trade);
+                        trade_history.push(trade);
+
+                        // Remove from price tracking
+                        let price_key = PriceKey::new(order.outcome, order.price);
+                        placed_first_leg_prices.remove(&price_key);
+
+                        // Prepare second leg on weak side
+                        let weak_side = match order.outcome {
+                            Outcome::Up => Outcome::Down,
+                            Outcome::Down => Outcome::Up,
+                        };
+
+                        let weak_side_size = match weak_side {
+                            Outcome::Up => bbu_size,
+                            Outcome::Down => bbd_size,
+                        };
+                        let weak_side_price = match weak_side {
+                            Outcome::Up => bbu,
+                            Outcome::Down => bbd,
+                        };
+
+                        if weak_side_price > 0.0 {
+                            new_second_legs.push((weak_side, weak_side_price, weak_side_size));
+                        }
+                    };
+
+                // FILL condition 1: best_bid dropped BELOW our price
+                // (entire level was consumed, price moved through us)
+                if best_bid_price < order.price - 0.001 {
+                    execute_fill(
+                        portfolio,
+                        trade_history,
+                        placed_first_leg_prices,
+                        &mut new_second_legs,
+                    );
+                    filled_indices.push(i);
+                    continue;
+                }
+
+                // FILL condition 2: We're still at best_bid, but size decreased from peak by ORDER_SIZE
+                // We were first in queue, so if size dropped, someone bought from us
+                if (best_bid_price - order.price).abs() < 0.001 {
+                    // Update peak (size can grow as others join behind us)
+                    let new_peak = peak_size.max(best_bid_size);
+
+                    // Check if size decreased from peak by at least ORDER_SIZE
+                    if new_peak - best_bid_size >= ORDER_SIZE {
+                        // Filled! Size dropped, we were first in queue
+                        execute_fill(
+                            portfolio,
+                            trade_history,
+                            placed_first_leg_prices,
+                            &mut new_second_legs,
+                        );
+                        filled_indices.push(i);
+                        continue;
+                    }
+
+                    // Not filled yet, update peak
+                    order.state = OrderState::AtBestBid {
+                        peak_size: new_peak,
+                    };
+                }
+            }
+            OrderState::TrackingQueuePosition { .. } => {
+                // This shouldn't happen for first leg, but handle gracefully
             }
         }
     }
 
-    for &i in filled_indices.iter().rev() {
+    // Step 2: Process second leg orders
+    for (i, order) in open_orders.iter_mut().enumerate() {
+        if !order.is_second_leg {
+            continue;
+        }
+
+        // Skip if already marked for fill/cancel
+        if filled_indices.contains(&i) || cancelled_indices.contains(&i) {
+            continue;
+        }
+
+        let (best_bid_price, best_bid_size, _order_book) = match order.outcome {
+            Outcome::Up => (bbu, bbu_size, &tick.up_bids),
+            Outcome::Down => (bbd, bbd_size, &tick.down_bids),
+        };
+
+        match order.state {
+            OrderState::TrackingQueuePosition {
+                shares_ahead,
+                peak_size,
+            } => {
+                // Second leg fill logic:
+                // 1. Fill if best_bid dropped BELOW our price (our entire level was bought out)
+                // 2. Fill if we ARE at best_bid AND enough shares cleared from queue
+                //
+                // IMPORTANT: We can ONLY get filled when our order is at best_bid!
+                // If our order is at 0.46 but best_bid is 0.47, we're not first in queue
+                // and won't get filled even if size at 0.46 decreases.
+
+                // FILL condition 1: best_bid dropped BELOW our price
+                // This means the entire level where our order was got bought out
+                if best_bid_price < order.price - 0.001 {
+                    let trade = Trade {
+                        outcome: order.outcome,
+                        price: order.price,
+                        size: order.size,
+                        executed_at_tick: tick_idx,
+                    };
+                    portfolio.execute_trade(&trade);
+                    trade_history.push(trade);
+                    filled_indices.push(i);
+                    continue;
+                }
+
+                // FILL condition 2: We ARE at best_bid and enough shares cleared
+                // Only check this if our order price matches best_bid
+                let is_at_best_bid = (best_bid_price - order.price).abs() < 0.001;
+
+                if is_at_best_bid {
+                    // We're at best_bid, track queue position
+                    let current_size = best_bid_size;
+
+                    // Update peak if size grew (others joined behind us)
+                    let new_peak = peak_size.max(current_size);
+
+                    // Check if enough shares cleared (shares_ahead + our ORDER_SIZE)
+                    let shares_needed = shares_ahead + ORDER_SIZE;
+                    if new_peak - current_size >= shares_needed {
+                        // Filled! Enough shares in front of us got executed
+                        let trade = Trade {
+                            outcome: order.outcome,
+                            price: order.price,
+                            size: order.size,
+                            executed_at_tick: tick_idx,
+                        };
+                        portfolio.execute_trade(&trade);
+                        trade_history.push(trade);
+                        filled_indices.push(i);
+                    } else {
+                        // Not filled yet, update peak size
+                        order.state = OrderState::TrackingQueuePosition {
+                            shares_ahead,
+                            peak_size: new_peak,
+                        };
+                    }
+                } else {
+                    // Our order is NOT at best_bid (e.g., our price is 0.46, best_bid is 0.47)
+                    // We cannot get filled in this situation - just keep waiting
+                    // Peak size tracking continues when we become best_bid again
+                }
+            }
+            _ => {
+                // Second leg should always be in TrackingQueuePosition state
+                // but if not, check for fill condition (best_bid dropped below our price)
+                if best_bid_price < order.price - 0.001 {
+                    let trade = Trade {
+                        outcome: order.outcome,
+                        price: order.price,
+                        size: order.size,
+                        executed_at_tick: tick_idx,
+                    };
+                    portfolio.execute_trade(&trade);
+                    trade_history.push(trade);
+                    filled_indices.push(i);
+                }
+            }
+        }
+    }
+
+    // Remove filled and cancelled orders (in reverse to maintain indices)
+    let mut to_remove: Vec<usize> = filled_indices
+        .iter()
+        .chain(cancelled_indices.iter())
+        .copied()
+        .collect();
+    to_remove.sort_unstable();
+    to_remove.dedup();
+    for &i in to_remove.iter().rev() {
         open_orders.remove(i);
     }
 
-    // Step 2: Check order placement
-    let up_best_bid_size = tick.up_bids.first().map(|b| b[1]).unwrap_or(0.0);
-    let down_best_bid_size = tick.down_bids.first().map(|b| b[1]).unwrap_or(0.0);
-    let up_best_bid_price = tick.up_bids.first().map(|b| b[0]).unwrap_or(0.0);
-    let down_best_bid_price = tick.down_bids.first().map(|b| b[0]).unwrap_or(0.0);
+    // Step 3: Place second leg orders for filled first legs
+    for (weak_side, weak_price, shares_ahead) in new_second_legs {
+        let order_id = *next_order_id;
+        *next_order_id += 1;
 
-    // Level 2 size (index 1)
-    let up_level_2_size: f64 = tick.up_bids.get(1).map(|b| b[1]).unwrap_or(0.0);
-    let down_level_2_size: f64 = tick.down_bids.get(1).map(|b| b[1]).unwrap_or(0.0);
-
-    // Sum of levels 3-6 (indices 2-5)
-    let up_levels_3_to_6_size: f64 = tick.up_bids.iter().skip(2).take(4).map(|b| b[1]).sum();
-    let down_levels_3_to_6_size: f64 = tick.down_bids.iter().skip(2).take(4).map(|b| b[1]).sum();
-
-    // Place pending opposite orders (second leg)
-    if !pending_opposite_orders.is_empty() {
-        let pending = pending_opposite_orders.clone();
-        pending_opposite_orders.clear();
-
-        for (first_side, first_side_price) in pending {
-            let opposite_side = match first_side {
-                Outcome::Up => Outcome::Down,
-                Outcome::Down => Outcome::Up,
-            };
-
-            let target_price = 0.99 - first_side_price;
-            if target_price <= 0.0 || target_price >= 1.0 {
-                continue;
-            }
-
-            // Place limit order at target_price
-            open_orders.push(Order {
-                outcome: opposite_side,
-                price: target_price,
-                size: ORDER_SIZE,
-                filled: 0.0,
-                placed_at_tick: tick_idx,
-                is_second_leg: true,
-            });
-        }
+        open_orders.push(Order {
+            outcome: weak_side,
+            price: weak_price,
+            size: ORDER_SIZE,
+            filled: 0.0,
+            placed_at_tick: tick_idx,
+            is_second_leg: true,
+            second_leg_id: Some(order_id),
+            state: OrderState::TrackingQueuePosition {
+                shares_ahead,
+                peak_size: shares_ahead, // Initial peak is the size when we joined
+            },
+        });
     }
 
-    // Place first orders
-    let strong_side = if up_best_bid_price >= 0.5 {
-        Some(Outcome::Up)
-    } else if down_best_bid_price >= 0.5 {
-        Some(Outcome::Down)
+    // Step 4: Check for entry conditions (spread opening)
+    let prev_bbu = previous_bids.bbu;
+    let prev_bbd = previous_bids.bbd;
+
+    // Update previous bids for next tick
+    previous_bids.bbu = bbu;
+    previous_bids.bbd = bbd;
+
+    // Skip first tick (no previous data)
+    if prev_bbu == 0.0 && prev_bbd == 0.0 {
+        return;
+    }
+
+    // Determine expensive and weak sides
+    // Expensive side has higher best_bid (typically >= 0.5)
+    let (expensive_side, _expensive_bb, _weak_side, weak_bb, weak_prev_bb) = if bbd >= bbu {
+        // bbd is expensive side (down)
+        (Outcome::Down, bbd, Outcome::Up, bbu, prev_bbu)
     } else {
-        None
+        // bbu is expensive side (up)
+        (Outcome::Up, bbu, Outcome::Down, bbd, prev_bbd)
     };
 
-    if let Some(side) = strong_side {
-        let (price, best_size, level_2_size, levels_3_to_6_size) = match side {
-            Outcome::Up => (
-                up_best_bid_price,
-                up_best_bid_size,
-                up_level_2_size,
-                up_levels_3_to_6_size,
-            ),
-            Outcome::Down => (
-                down_best_bid_price,
-                down_best_bid_size,
-                down_level_2_size,
-                down_levels_3_to_6_size,
-            ),
+    // Entry condition: weak side decreased
+    // This creates a spread we want to close by placing on expensive side
+    let weak_decreased = weak_bb < weak_prev_bb && weak_prev_bb > 0.0;
+
+    if weak_decreased {
+        // Calculate target price for first leg on expensive side
+        // target = 0.99 - weak_bb (to close the spread)
+        let target_price = 0.99 - weak_bb;
+
+        // Validate target price
+        if target_price <= 0.0 || target_price >= 1.0 {
+            return;
+        }
+
+        // Get the order book for the expensive side
+        let expensive_bids = match expensive_side {
+            Outcome::Up => &tick.up_bids,
+            Outcome::Down => &tick.down_bids,
         };
 
-        let price_key = PriceKey::new(side, price);
+        // Check second level size requirement
+        // We want to place at target_price, so we need to check that
+        // the level just below target_price (second level when we become best_bid)
+        // has enough size to provide liquidity support
+        //
+        // Example: target_price = 0.65, we check size at 0.64 level
+        let second_level_price = target_price - 0.01;
+        let second_level_size = expensive_bids
+            .iter()
+            .find(|bid| (bid[0] - second_level_price).abs() < 0.001)
+            .map(|bid| bid[1])
+            .unwrap_or(0.0);
 
-        if !placed_first_order_prices.contains(&price_key)
-            && best_size < SIZE_THRESHOLD
-            && level_2_size >= SECOND_LEVEL_THRESHOLD
-            && levels_3_to_6_size >= THIRD_SIXTH_LEVEL_THRESHOLD
-            && price > 0.0
-        {
-            let has_open_order_at_price = open_orders
-                .iter()
-                .any(|o| o.outcome == side && (o.price - price).abs() < 0.01);
-
-            if !has_open_order_at_price {
-                open_orders.push(Order {
-                    outcome: side,
-                    price,
-                    size: ORDER_SIZE,
-                    filled: 0.0,
-                    placed_at_tick: tick_idx,
-                    is_second_leg: false,
-                });
-                placed_first_order_prices.insert(price_key);
-            }
+        if second_level_size < SECOND_LEVEL_MIN_SIZE {
+            return;
         }
+
+        // Check if we already have an order at this price (only one per price)
+        let price_key = PriceKey::new(expensive_side, target_price);
+        if placed_first_leg_prices.contains(&price_key) {
+            return;
+        }
+
+        // Check no open order at similar price
+        let has_open_order = open_orders.iter().any(|o| {
+            o.outcome == expensive_side
+                && (o.price - target_price).abs() < 0.001
+                && !o.is_second_leg
+        });
+
+        if has_open_order {
+            return;
+        }
+
+        // Place first leg order
+        let order_id = *next_order_id;
+        *next_order_id += 1;
+
+        open_orders.push(Order {
+            outcome: expensive_side,
+            price: target_price,
+            size: ORDER_SIZE,
+            filled: 0.0,
+            placed_at_tick: tick_idx,
+            is_second_leg: false,
+            second_leg_id: Some(order_id),
+            state: OrderState::WaitingForPrice,
+        });
+
+        placed_first_leg_prices.insert(price_key);
     }
 }
 
@@ -334,10 +643,12 @@ pub struct DemoTradingState {
     pub trade_history: Vec<Trade>,
     pub history_start_time: Instant,
 
-    // Track prices where we've placed first orders (strong side)
-    placed_first_order_prices: HashSet<PriceKey>,
-    // Track which first orders have been filled and need opposite side order
-    pending_opposite_orders: Vec<(Outcome, f64)>, // (first_side, first_side_price)
+    // Track prices where we've placed first leg orders (expensive side)
+    placed_first_leg_prices: HashSet<PriceKey>,
+    // Previous tick's best bids for spread detection
+    previous_bids: PreviousBids,
+    // Counter for generating unique order IDs
+    next_order_id: u64,
 
     // Precalculated snapshots for instant seeking
     snapshots: Vec<TickSnapshot>,
@@ -361,8 +672,9 @@ pub fn calculate_event_result(recording: &Recording) -> EventResult {
     let mut portfolio = Portfolio::new();
     let mut open_orders: Vec<Order> = Vec::new();
     let mut trade_history: Vec<Trade> = Vec::new();
-    let mut placed_first_order_prices: HashSet<PriceKey> = HashSet::new();
-    let mut pending_opposite_orders: Vec<(Outcome, f64)> = Vec::new();
+    let mut placed_first_leg_prices: HashSet<PriceKey> = HashSet::new();
+    let mut previous_bids = PreviousBids::default();
+    let mut next_order_id: u64 = 1;
 
     // Process all ticks using shared logic
     for (tick_idx, tick) in recording.ticks.iter().enumerate() {
@@ -372,8 +684,9 @@ pub fn calculate_event_result(recording: &Recording) -> EventResult {
             &mut portfolio,
             &mut open_orders,
             &mut trade_history,
-            &mut placed_first_order_prices,
-            &mut pending_opposite_orders,
+            &mut placed_first_leg_prices,
+            &mut previous_bids,
+            &mut next_order_id,
         );
     }
 
@@ -432,8 +745,9 @@ impl DemoTradingState {
             open_orders: Vec::new(),
             trade_history: Vec::new(),
             history_start_time: Instant::now(),
-            placed_first_order_prices: HashSet::new(),
-            pending_opposite_orders: Vec::new(),
+            placed_first_leg_prices: HashSet::new(),
+            previous_bids: PreviousBids::default(),
+            next_order_id: 1,
             snapshots: Vec::new(),
             final_result: None,
         };
@@ -480,8 +794,9 @@ impl DemoTradingState {
         self.trade_history.clear();
         self.history_start_time = Instant::now();
         self.accumulated_time_ms = 0.0;
-        self.placed_first_order_prices.clear();
-        self.pending_opposite_orders.clear();
+        self.placed_first_leg_prices.clear();
+        self.previous_bids = PreviousBids::default();
+        self.next_order_id = 1;
     }
 
     pub fn move_ticks(&mut self, delta: i32) {
@@ -516,8 +831,9 @@ impl DemoTradingState {
         self.portfolio = Portfolio::new();
         self.open_orders.clear();
         self.trade_history.clear();
-        self.placed_first_order_prices.clear();
-        self.pending_opposite_orders.clear();
+        self.placed_first_leg_prices.clear();
+        self.previous_bids = PreviousBids::default();
+        self.next_order_id = 1;
         self.snapshots.clear();
 
         // Reserve capacity for snapshots
@@ -599,8 +915,9 @@ impl DemoTradingState {
             portfolio: self.portfolio.clone(),
             open_orders: self.open_orders.clone(),
             trade_history: self.trade_history.clone(),
-            placed_first_order_prices: self.placed_first_order_prices.clone(),
-            pending_opposite_orders: self.pending_opposite_orders.clone(),
+            placed_first_leg_prices: self.placed_first_leg_prices.clone(),
+            previous_bids: self.previous_bids,
+            next_order_id: self.next_order_id,
         });
     }
 
@@ -614,8 +931,9 @@ impl DemoTradingState {
         self.portfolio = snapshot.portfolio.clone();
         self.open_orders = snapshot.open_orders.clone();
         self.trade_history = snapshot.trade_history.clone();
-        self.placed_first_order_prices = snapshot.placed_first_order_prices.clone();
-        self.pending_opposite_orders = snapshot.pending_opposite_orders.clone();
+        self.placed_first_leg_prices = snapshot.placed_first_leg_prices.clone();
+        self.previous_bids = snapshot.previous_bids;
+        self.next_order_id = snapshot.next_order_id;
     }
 
     /// Fast-forward to a specific quarter (1-4) of the recording
@@ -655,16 +973,10 @@ impl DemoTradingState {
         self.open_orders
             .retain(|order| order.placed_at_tick <= target_tick);
 
-        // Rebuild tracking state based on remaining orders and trades
-        self.placed_first_order_prices.clear();
-        self.pending_opposite_orders.clear();
-
-        // Rebuild placed_first_order_prices from remaining open orders
-        // We can only track orders that are still open (unfilled)
-        for order in &self.open_orders {
-            let price_key = PriceKey::new(order.outcome, order.price);
-            self.placed_first_order_prices.insert(price_key);
-        }
+        // Rebuild tracking state based on remaining orders
+        self.placed_first_leg_prices.clear();
+        self.previous_bids = PreviousBids::default();
+        // Note: Cannot fully reconstruct state from remaining orders. Use snapshots instead.
     }
 
     pub fn update(&mut self) {
@@ -712,8 +1024,9 @@ impl DemoTradingState {
             &mut self.portfolio,
             &mut self.open_orders,
             &mut self.trade_history,
-            &mut self.placed_first_order_prices,
-            &mut self.pending_opposite_orders,
+            &mut self.placed_first_leg_prices,
+            &mut self.previous_bids,
+            &mut self.next_order_id,
         );
     }
 

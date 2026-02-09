@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub const ORDER_BOOK_DEPTH: usize = 20;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordingMetadata {
     #[serde(default)]
@@ -33,21 +35,67 @@ pub struct Tick {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+pub struct PriceChangeLevel {
+    pub outcome: String,
+    pub price: f64,
+    pub size: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PriceChangeTick {
+    pub ts: i64,
+    pub changes: Vec<PriceChangeLevel>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TickSource {
+    Book,
+    PriceChange,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum RecordingLine {
     Metadata(RecordingMetadata),
     Tick(Tick),
+    PriceChange(PriceChangeTick),
 }
 
 #[derive(Debug, Clone)]
 pub struct Recording {
     pub metadata: RecordingMetadata,
     pub ticks: Vec<Tick>,
+    pub tick_sources: Vec<TickSource>,
+    pub price_changes: Vec<PriceChangeTick>,
 }
 
 impl Recording {
-    pub fn new(metadata: RecordingMetadata, ticks: Vec<Tick>) -> Self {
-        Self { metadata, ticks }
+    pub fn new(
+        metadata: RecordingMetadata,
+        ticks: Vec<Tick>,
+        tick_sources: Vec<TickSource>,
+        price_changes: Vec<PriceChangeTick>,
+    ) -> Self {
+        Self {
+            metadata,
+            ticks,
+            tick_sources,
+            price_changes,
+        }
+    }
+
+    pub fn book_count(&self) -> usize {
+        self.tick_sources
+            .iter()
+            .filter(|s| **s == TickSource::Book)
+            .count()
+    }
+
+    pub fn price_change_count(&self) -> usize {
+        self.tick_sources
+            .iter()
+            .filter(|s| **s == TickSource::PriceChange)
+            .count()
     }
 
     #[allow(dead_code)]
