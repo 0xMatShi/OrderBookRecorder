@@ -269,11 +269,44 @@ fn draw_order_book(frame: &mut Frame, state: &ReplayState, area: Rect, is_up: bo
         .filter(|c| c.outcome == outcome_filter)
         .collect();
 
-    // Собираем цены, которые были затронуты price_change
-    let filled_prices: std::collections::HashSet<String> = current_price_changes
+    // Собираем цены, которые были затронуты price_change (используем f64, не строки)
+    let filled_prices: Vec<f64> = current_price_changes
         .iter()
-        .map(|c| format!("{:.2}", c.price))
+        .map(|c| c.price)
         .collect();
+
+    // Проверяем есть ли book-тик с тем же timestamp (паттерн: price_change + book = трейд)
+    // Для PC-тиков это единственный способ определить fill vs cancel
+    let has_book_at_current_ts = if !is_from_book && current_ts != 0 {
+        let mut found = false;
+        // Ищем назад от текущей позиции
+        let mut i = state.current_tick;
+        loop {
+            if state.recording.ticks[i].ts != current_ts {
+                break;
+            }
+            if state.recording.tick_sources[i] == crate::models::TickSource::Book {
+                found = true;
+                break;
+            }
+            if i == 0 { break; }
+            i -= 1;
+        }
+        if !found {
+            // Ищем вперёд
+            let mut i = state.current_tick + 1;
+            while i < state.recording.ticks.len() && state.recording.ticks[i].ts == current_ts {
+                if state.recording.tick_sources[i] == crate::models::TickSource::Book {
+                    found = true;
+                    break;
+                }
+                i += 1;
+            }
+        }
+        found
+    } else {
+        is_from_book
+    };
 
     // Собираем удаленные уровни (size=0) для отображения "фантомных" уровней
     let deleted_levels: Vec<f64> = current_price_changes
@@ -297,6 +330,9 @@ fn draw_order_book(frame: &mut Frame, state: &ReplayState, area: Rect, is_up: bo
     // Когда агрессивный трейд съедает весь уровень, приходит price_change с size=0
     // и этот уровень удаляется из snapshot. Но для анализа критично видеть эти уровни!
     //
+    // ВАЖНО: Показываем фантомный уровень ТОЛЬКО если он был удален в ТЕКУЩЕМ тике
+    // (т.е. был в prev_bids с ненулевым size, а сейчас в deleted_levels)
+    //
     // Пример: трейд съел 0.74 (было 15) и зацепил 0.73 (было 20, стало 10):
     //   price_change: [{"price":0.74,"size":0}, {"price":0.73,"size":10}] ts=1000
     //   tick: [[0.73,10], [0.72,50], ...] ts=1000
@@ -307,10 +343,16 @@ fn draw_order_book(frame: &mut Frame, state: &ReplayState, area: Rect, is_up: bo
     //   0.72 | 50 | ·
     let mut combined_levels: Vec<[f64; 2]> = bids.to_vec();
 
-    // Добавляем фантомные уровни (удаленные)
+    // Добавляем фантомные уровни (удаленные) ТОЛЬКО если они были в предыдущем тике
     for deleted_price in &deleted_levels {
         // Проверяем что этого уровня нет в текущих bids
-        if !bids.iter().any(|b| (b[0] - deleted_price).abs() < 1e-9) {
+        let not_in_current = !bids.iter().any(|b| (b[0] - deleted_price).abs() < 1e-9);
+
+        // Проверяем что этот уровень БЫЛ в предыдущем тике с ненулевым size
+        let was_in_prev = prev_bids.iter().any(|b| (b[0] - deleted_price).abs() < 1e-9 && b[1] > 0.5);
+
+        // Показываем фантомный уровень только если он был удален ПРЯМО СЕЙЧАС
+        if not_in_current && was_in_prev {
             combined_levels.push([*deleted_price, 0.0]);
         }
     }
@@ -342,8 +384,9 @@ fn draw_order_book(frame: &mut Frame, state: &ReplayState, area: Rect, is_up: bo
                     // Размер уменьшился
                     // Проверяем: есть ли price_change с текущим timestamp для этой цены?
                     // Если да - это FILL (трейд), иначе - CANCEL (отмена ордера)
-                    let price_str = format!("{:.2}", price);
-                    let is_fill = is_from_book || filled_prices.contains(&price_str);
+                    // Используем числовое сравнение с epsilon для точности (не строки!)
+                    let is_fill = is_from_book ||
+                        (has_book_at_current_ts && filled_prices.iter().any(|&p| (p - price).abs() < 1e-6));
 
                     let color = if is_fill {
                         Color::Magenta // FILL (трейд)
