@@ -116,6 +116,13 @@ fn draw_info_panel(frame: &mut Frame, state: &ReplayState, area: Rect) {
 
     let time_info = format!("{} / {}", state.current_time_str(), state.total_time_str());
 
+    // Форматируем latency если доступна
+    let latency_text = if let Some(latency) = state.recording.metadata.avg_latency_ms {
+        format!("{} ms", latency)
+    } else {
+        "N/A".to_string()
+    };
+
     let text = vec![
         Line::from(vec![
             Span::styled("Title: ", Style::default().fg(Color::Gray)),
@@ -129,6 +136,13 @@ fn draw_info_panel(frame: &mut Frame, state: &ReplayState, area: Rect) {
             Span::styled(
                 &state.recording.metadata.slug,
                 Style::default().fg(Color::Cyan),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Latency: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                latency_text,
+                Style::default().fg(Color::Blue),
             ),
         ]),
         Line::from(""),
@@ -401,7 +415,14 @@ fn draw_order_book(frame: &mut Frame, state: &ReplayState, area: Rect, is_up: bo
 
             Row::new(vec![
                 Cell::from(format!("{}", i + 1)).style(Style::default().fg(Color::DarkGray)),
-                Cell::from(format!("{:.2}", price)).style(Style::default().fg(Color::White)),
+                Cell::from({
+                    let cents = price * 100.0;
+                    if (cents - cents.round()).abs() < 0.01 {
+                        format!("{:.0}¢", cents)
+                    } else {
+                        format!("{:.1}¢", cents)
+                    }
+                }).style(Style::default().fg(Color::White)),
                 Cell::from(format!("{:.0}", size)).style(Style::default().fg(Color::Yellow)),
                 Cell::from(delta_str).style(Style::default().fg(delta_color)),
                 Cell::from(format!("${:.0}", cumulative_cost))
@@ -414,7 +435,7 @@ fn draw_order_book(frame: &mut Frame, state: &ReplayState, area: Rect, is_up: bo
         rows,
         [
             Constraint::Length(3),
-            Constraint::Length(6),
+            Constraint::Length(7),
             Constraint::Length(8),
             Constraint::Length(7),
             Constraint::Min(8),

@@ -1,3 +1,4 @@
+mod analysis;
 mod demo_trading;
 mod download;
 mod models;
@@ -31,7 +32,8 @@ async fn main() -> Result<()> {
         println!("1. Download (record live data)");
         println!("2. Replay (playback recording)");
         println!("3. Demo-Trading (trade with virtual balance)");
-        println!("4. Exit");
+        println!("4. Size Analysis (track specific order size)");
+        println!("5. Exit");
         print!("\nSelect option: ");
         io::stdout().flush()?;
 
@@ -42,7 +44,8 @@ async fn main() -> Result<()> {
             "1" => download_mode().await?,
             "2" => replay_mode()?,
             "3" => demo_trading_mode()?,
-            "4" => {
+            "4" => size_analysis_mode()?,
+            "5" => {
                 clear_screen();
                 println!("Goodbye!");
                 break;
@@ -285,6 +288,79 @@ fn demo_trading_mode() -> Result<()> {
 
     let state = crate::demo_trading::DemoTradingState::new(recording);
     crate::demo_trading::run_tui(state)?;
+
+    Ok(())
+}
+
+fn size_analysis_mode() -> Result<()> {
+    clear_screen();
+    let storage = RecordingStorage::new(RECORDINGS_DIR)?;
+    let recordings = storage.list_recordings()?;
+
+    if recordings.is_empty() {
+        println!("No recordings found in '{}'", RECORDINGS_DIR);
+        println!("\nPress Enter to continue...");
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        return Ok(());
+    }
+
+    println!("=== Size Analysis ===");
+    for (i, path) in recordings.iter().enumerate() {
+        let metadata = RecordingStorage::load_metadata(path);
+        match metadata {
+            Ok(m) => {
+                println!("{}. {} ({} ticks)", i + 1, m.display_name(), m.total_ticks);
+            }
+            Err(_) => {
+                println!(
+                    "{}. {} (error reading metadata)",
+                    i + 1,
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                );
+            }
+        }
+    }
+
+    print!(
+        "\nSelect recording (1-{}, Enter to go back): ",
+        recordings.len()
+    );
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+
+    if input.trim().is_empty() {
+        return Ok(());
+    }
+
+    let index: usize = match input.trim().parse::<usize>() {
+        Ok(n) if n >= 1 && n <= recordings.len() => n - 1,
+        _ => {
+            return Ok(());
+        }
+    };
+
+    print!("Enter target order size: ");
+    io::stdout().flush()?;
+
+    let mut size_input = String::new();
+    io::stdin().read_line(&mut size_input)?;
+
+    let target_size: f64 = match size_input.trim().parse() {
+        Ok(s) if s > 0.0 => s,
+        _ => {
+            println!("Invalid size");
+            return Ok(());
+        }
+    };
+
+    let recording_path = &recordings[index];
+    let recording = RecordingStorage::load_recording(recording_path)?;
+
+    let state = crate::analysis::SizeTrackerState::new(recording, target_size);
+    crate::analysis::run_tui(state)?;
 
     Ok(())
 }

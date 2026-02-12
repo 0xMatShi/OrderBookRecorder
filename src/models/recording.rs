@@ -14,6 +14,10 @@ pub struct RecordingMetadata {
     pub start_time: DateTime<Utc>,
     pub end_time: DateTime<Utc>,
     pub total_ticks: u32,
+    /// Средняя разница между локальным временем получения и серверным timestamp (в миллисекундах)
+    /// Положительное значение означает, что локальное время опережает серверное (обычный случай из-за latency)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_latency_ms: Option<i64>,
 }
 
 impl RecordingMetadata {

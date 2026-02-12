@@ -136,6 +136,13 @@ fn draw_info_panel(frame: &mut Frame, state: &DemoTradingState, area: Rect) {
 
     let time_info = format!("{} / {}", state.current_time_str(), state.total_time_str());
 
+    // Форматируем latency если доступна
+    let latency_text = if let Some(latency) = state.recording.metadata.avg_latency_ms {
+        format!("{} ms", latency)
+    } else {
+        "N/A".to_string()
+    };
+
     let text = vec![
         Line::from(vec![
             Span::styled("Title: ", Style::default().fg(Color::Gray)),
@@ -149,6 +156,13 @@ fn draw_info_panel(frame: &mut Frame, state: &DemoTradingState, area: Rect) {
             Span::styled(
                 &state.recording.metadata.slug,
                 Style::default().fg(Color::Cyan),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Latency: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                latency_text,
+                Style::default().fg(Color::Blue),
             ),
         ]),
         Line::from(""),
@@ -412,10 +426,18 @@ fn draw_order_book(frame: &mut Frame, state: &DemoTradingState, area: Rect, is_u
 
             let has_order = pending_prices.iter().any(|&p| (p - price).abs() < 0.001);
 
-            let price_text = if has_order {
-                format!("{:.0}¢ ⏱", price * 100.0)
-            } else {
-                format!("{:.0}¢", price * 100.0)
+            let price_text = {
+                let cents = price * 100.0;
+                let cents_str = if (cents - cents.round()).abs() < 0.01 {
+                    format!("{:.0}¢", cents)
+                } else {
+                    format!("{:.1}¢", cents)
+                };
+                if has_order {
+                    format!("{} ⏱", cents_str)
+                } else {
+                    cents_str
+                }
             };
 
             Row::new(vec![

@@ -50,22 +50,35 @@ impl Recorder {
 
         let tick_count = Arc::new(AtomicU32::new(0));
 
+        // Коллектор для измерения latency между локальным и серверным временем
+        let latency_samples = Arc::new(std::sync::Mutex::new(Vec::<i64>::new()));
+
         loop {
             if Utc::now() >= end_date {
                 let total = tick_count.load(Ordering::Relaxed);
-                RecordingStorage::update_total_ticks(&filepath, total)?;
-                info!("✅ Запись завершена. Всего тиков: {}", total);
+                let avg_latency = Self::calculate_avg_latency(&latency_samples);
+                RecordingStorage::update_metadata(&filepath, total, avg_latency)?;
+                if let Some(latency) = avg_latency {
+                    info!("✅ Запись завершена. Всего тиков: {}, Средняя latency: {} мс", total, latency);
+                } else {
+                    info!("✅ Запись завершена. Всего тиков: {}", total);
+                }
                 return Ok(());
             }
 
             match self
-                .run_stream_once(target, &filepath, end_date, tick_count.clone())
+                .run_stream_once(target, &filepath, end_date, tick_count.clone(), latency_samples.clone())
                 .await
             {
                 Ok(_) => {
                     let total = tick_count.load(Ordering::Relaxed);
-                    RecordingStorage::update_total_ticks(&filepath, total)?;
-                    info!("✅ Запись завершена. Всего тиков: {}", total);
+                    let avg_latency = Self::calculate_avg_latency(&latency_samples);
+                    RecordingStorage::update_metadata(&filepath, total, avg_latency)?;
+                    if let Some(latency) = avg_latency {
+                        info!("✅ Запись завершена. Всего тиков: {}, Средняя latency: {} мс", total, latency);
+                    } else {
+                        info!("✅ Запись завершена. Всего тиков: {}", total);
+                    }
                     return Ok(());
                 }
                 Err(e) => {
@@ -81,6 +94,7 @@ impl Recorder {
         filepath: &PathBuf,
         end_date: DateTime<Utc>,
         tick_count: Arc<AtomicU32>,
+        latency_samples: Arc<std::sync::Mutex<Vec<i64>>>,
     ) -> Result<()> {
         let (mut ws_stream, _) = connect_async(&self.ws_url).await?;
 
@@ -113,7 +127,19 @@ impl Recorder {
                 msg = ws_stream.next() => {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
+                            // Захватываем локальное время получения сообщения
+                            let local_receive_time = Utc::now();
+
                             if let Ok(book) = serde_json::from_str::<BookMessage>(&text) {
+                                // Вычисляем latency: разница между локальным и серверным временем
+                                let server_ts_ms = book.timestamp;
+                                let local_ts_ms = local_receive_time.timestamp_millis();
+                                let latency_ms = local_ts_ms - server_ts_ms;
+
+                                // Сохраняем измерение latency
+                                if let Ok(mut samples) = latency_samples.lock() {
+                                    samples.push(latency_ms);
+                                }
                                 let mut sorted_bids: Vec<_> = book.bids.iter()
                                     .map(|o| [o.price, o.size])
                                     .collect();
@@ -148,6 +174,15 @@ impl Recorder {
                                     event_counter += 1;
                                 }
                             } else if let Ok(pc) = serde_json::from_str::<PriceChangeMessage>(&text) {
+                                // Вычисляем latency для price_change событий
+                                let server_ts_ms = pc.timestamp;
+                                let local_ts_ms = local_receive_time.timestamp_millis();
+                                let latency_ms = local_ts_ms - server_ts_ms;
+
+                                // Сохраняем измерение latency
+                                if let Ok(mut samples) = latency_samples.lock() {
+                                    samples.push(latency_ms);
+                                }
                                 let changes: Vec<PriceChangeLevel> = pc.price_changes.iter()
                                     .filter(|c| c.side == "BUY")
                                     .map(|c| {
@@ -240,5 +275,19 @@ impl Recorder {
         }
 
         Ok(())
+    }
+
+    /// Вычисляет среднюю latency из собранных измерений
+    fn calculate_avg_latency(latency_samples: &Arc<std::sync::Mutex<Vec<i64>>>) -> Option<i64> {
+        if let Ok(samples) = latency_samples.lock() {
+            if samples.is_empty() {
+                return None;
+            }
+            let sum: i64 = samples.iter().sum();
+            let avg = sum / samples.len() as i64;
+            Some(avg)
+        } else {
+            None
+        }
     }
 }

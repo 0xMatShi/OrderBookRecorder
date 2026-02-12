@@ -42,6 +42,7 @@ impl RecordingStorage {
             start_time,
             end_time,
             total_ticks: 0,
+            avg_latency_ms: None,
         };
 
         let line = RecordingLine::Metadata(metadata);
@@ -65,7 +66,7 @@ impl RecordingStorage {
         Ok(())
     }
 
-    pub fn update_total_ticks(filepath: &Path, total_ticks: u32) -> Result<()> {
+    pub fn update_metadata(filepath: &Path, total_ticks: u32, avg_latency_ms: Option<i64>) -> Result<()> {
         let file = File::open(filepath)?;
         let reader = BufReader::new(file);
         let mut lines: Vec<String> = reader.lines().collect::<std::io::Result<_>>()?;
@@ -73,6 +74,7 @@ impl RecordingStorage {
         if let Some(first_line) = lines.first_mut() {
             if let Ok(RecordingLine::Metadata(mut metadata)) = serde_json::from_str(first_line) {
                 metadata.total_ticks = total_ticks;
+                metadata.avg_latency_ms = avg_latency_ms;
                 *first_line = serde_json::to_string(&RecordingLine::Metadata(metadata))?;
             }
         }
@@ -83,6 +85,11 @@ impl RecordingStorage {
         }
 
         Ok(())
+    }
+
+    /// Обратная совместимость: обновить только total_ticks
+    pub fn update_total_ticks(filepath: &Path, total_ticks: u32) -> Result<()> {
+        Self::update_metadata(filepath, total_ticks, None)
     }
 
     pub fn list_recordings(&self) -> Result<Vec<PathBuf>> {
