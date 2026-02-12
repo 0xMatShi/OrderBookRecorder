@@ -87,11 +87,6 @@ impl RecordingStorage {
         Ok(())
     }
 
-    /// Обратная совместимость: обновить только total_ticks
-    pub fn update_total_ticks(filepath: &Path, total_ticks: u32) -> Result<()> {
-        Self::update_metadata(filepath, total_ticks, None)
-    }
-
     pub fn list_recordings(&self) -> Result<Vec<PathBuf>> {
         let mut recordings = Vec::new();
         for entry in fs::read_dir(&self.recordings_dir)? {

@@ -120,12 +120,26 @@ fn draw_info_panel(frame: &mut Frame, state: &SizeTrackerState, area: Rect) {
     );
     let time_info = format!("{} / {}", state.current_time_str(), state.total_time_str());
 
+    // Форматируем latency если доступна
+    let latency_text = if let Some(latency) = state.recording.metadata.avg_latency_ms {
+        format!("{} ms", latency)
+    } else {
+        "N/A".to_string()
+    };
+
     let text = vec![
         Line::from(vec![
             Span::styled("Title: ", Style::default().fg(Color::Gray)),
             Span::styled(
                 &state.recording.metadata.title,
                 Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Latency: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                latency_text,
+                Style::default().fg(Color::Blue),
             ),
         ]),
         Line::from(vec![
