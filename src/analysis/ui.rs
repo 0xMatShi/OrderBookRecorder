@@ -83,18 +83,24 @@ fn draw_ui(frame: &mut Frame, state: &SizeTrackerState) {
         ])
         .split(main_layout[0]);
 
-    // Right side: Up Bids, Down Bids
-    let right_layout = Layout::default()
+    // Right side: OBI on top, then Up Bids | Down Bids side by side
+    let right_vertical = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([Constraint::Length(4), Constraint::Min(10)])
         .split(main_layout[1]);
+
+    let right_books = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(right_vertical[1]);
 
     draw_info_panel(frame, state, left_layout[0]);
     draw_portfolio_panel(frame, state, left_layout[1]);
     draw_open_orders_panel(frame, state, left_layout[2]);
     draw_history_panel(frame, state, left_layout[3]);
-    draw_order_book(frame, state, right_layout[0], true);
-    draw_order_book(frame, state, right_layout[1], false);
+    draw_obi_panel(frame, state, right_vertical[0]);
+    draw_order_book(frame, state, right_books[0], true);
+    draw_order_book(frame, state, right_books[1], false);
 }
 
 fn draw_info_panel(frame: &mut Frame, state: &SizeTrackerState, area: Rect) {
@@ -472,6 +478,56 @@ fn draw_history_panel(frame: &mut Frame, state: &SizeTrackerState, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
+fn draw_obi_panel(frame: &mut Frame, state: &SizeTrackerState, area: Rect) {
+    const OBI_DEPTH: usize = 6;
+
+    let (up_vol, down_vol, up_bid_vol, up_ask_vol) = if !state.recording.ticks.is_empty() {
+        let tick = &state.recording.ticks[state.current_tick];
+        let uv: f64 = tick.up_bids.iter().take(OBI_DEPTH).map(|b| b[0] * b[1]).sum();
+        let dv: f64 = tick.down_bids.iter().take(OBI_DEPTH).map(|b| b[0] * b[1]).sum();
+        // Full OBI: UP bids vs UP asks (derived from DOWN bids)
+        // DOWN bid at price P = UP ask at price (1-P)
+        let ua: f64 = tick.down_bids.iter().take(OBI_DEPTH).map(|b| (1.0 - b[0]) * b[1]).sum();
+        (uv, dv, uv, ua)
+    } else {
+        (0.0, 0.0, 0.0, 0.0)
+    };
+
+    // OBI: (V_up - V_down) / (V_up + V_down)
+    let total = up_vol + down_vol;
+    let obi = if total > 0.0 { (up_vol - down_vol) / total } else { 0.0 };
+
+    // Full OBI: (V_bid - V_ask) / (V_bid + V_ask) for UP side
+    let full_total = up_bid_vol + up_ask_vol;
+    let full_obi = if full_total > 0.0 { (up_bid_vol - up_ask_vol) / full_total } else { 0.0 };
+
+    let obi_color = if obi > 0.1 { Color::Green } else if obi < -0.1 { Color::Red } else { Color::Yellow };
+    let full_obi_color = if full_obi > 0.1 { Color::Green } else if full_obi < -0.1 { Color::Red } else { Color::Yellow };
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("OBI: ", Style::default().fg(Color::Gray)),
+            Span::styled(format!("{:+.2}", obi), Style::default().fg(obi_color).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  (U: ${:.0} | D: ${:.0})", up_vol, down_vol), Style::default().fg(Color::DarkGray)),
+        ]).alignment(Alignment::Center),
+        Line::from(vec![
+            Span::styled("Full: ", Style::default().fg(Color::Gray)),
+            Span::styled(format!("{:+.2}", full_obi), Style::default().fg(full_obi_color).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  (Bid: ${:.0} | Ask: ${:.0})", up_bid_vol, up_ask_vol), Style::default().fg(Color::DarkGray)),
+        ]).alignment(Alignment::Center),
+    ];
+
+    let paragraph = Paragraph::new(lines)
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" OBI ")
+                .title_alignment(Alignment::Center),
+        );
+    frame.render_widget(paragraph, area);
+}
+
 fn draw_order_book(frame: &mut Frame, state: &SizeTrackerState, area: Rect, is_up: bool) {
     let title = if is_up { " UP Bids " } else { " DOWN Bids " };
     let title_color = if is_up { Color::Green } else { Color::Red };
@@ -495,11 +551,23 @@ fn draw_order_book(frame: &mut Frame, state: &SizeTrackerState, area: Rect, is_u
         }
     };
 
-    let header = Row::new(vec![
-        Cell::from("Price").style(Style::default().fg(Color::Gray)),
-        Cell::from("Size").style(Style::default().fg(Color::Gray)),
-        Cell::from("D").style(Style::default().fg(Color::Gray)),
-    ])
+    // UP: Cum D SIZE PRICE — right-aligned (price toward center)
+    // DOWN: PRICE SIZE D Cum — left-aligned (price toward center)
+    let header = if is_up {
+        Row::new(vec![
+            Cell::from(Line::from("Cum$").alignment(Alignment::Right)).style(Style::default().fg(Color::DarkGray)),
+            Cell::from(Line::from("D").alignment(Alignment::Right)).style(Style::default().fg(Color::Gray)),
+            Cell::from(Line::from("Size").alignment(Alignment::Right)).style(Style::default().fg(Color::Gray)),
+            Cell::from(Line::from("Price").alignment(Alignment::Right)).style(Style::default().fg(Color::Gray)),
+        ])
+    } else {
+        Row::new(vec![
+            Cell::from("Price").style(Style::default().fg(Color::Gray)),
+            Cell::from("Size").style(Style::default().fg(Color::Gray)),
+            Cell::from("D").style(Style::default().fg(Color::Gray)),
+            Cell::from("Cum$").style(Style::default().fg(Color::DarkGray)),
+        ])
+    }
     .height(1)
     .bottom_margin(1);
 
@@ -511,11 +579,13 @@ fn draw_order_book(frame: &mut Frame, state: &SizeTrackerState, area: Rect, is_u
         *tracked_counts.entry(key).or_insert(0) += 1;
     }
 
+    let mut cum_value = 0.0_f64;
     let rows: Vec<Row> = bids
         .iter()
         .map(|bid| {
             let price = bid[0];
             let size = bid[1];
+            cum_value += price * size;
 
             let price_key = (price * 100.0).round() as u32;
             let tracked_count = tracked_counts.get(&price_key).copied().unwrap_or(0);
@@ -553,29 +623,52 @@ fn draw_order_book(frame: &mut Frame, state: &SizeTrackerState, area: Rect, is_u
                 Style::default().fg(Color::White)
             };
 
-            Row::new(vec![
-                Cell::from(price_text).style(price_style),
-                Cell::from(format!("{:.0}", size)).style(Style::default().fg(Color::Yellow)),
-                Cell::from(delta_str).style(Style::default().fg(delta_color)),
-            ])
+            let cum_text = format!("{:.0}", cum_value);
+
+            if is_up {
+                let cum_cell = Cell::from(Line::from(cum_text).alignment(Alignment::Right)).style(Style::default().fg(Color::DarkGray));
+                let delta_cell = Cell::from(Line::from(delta_str).alignment(Alignment::Right)).style(Style::default().fg(delta_color));
+                let size_cell = Cell::from(Line::from(format!("{:.0}", size)).alignment(Alignment::Right)).style(Style::default().fg(Color::Yellow));
+                let price_cell = Cell::from(Line::from(price_text).alignment(Alignment::Right)).style(price_style);
+                Row::new(vec![cum_cell, delta_cell, size_cell, price_cell])
+            } else {
+                let delta_cell = Cell::from(delta_str).style(Style::default().fg(delta_color));
+                let size_cell = Cell::from(format!("{:.0}", size)).style(Style::default().fg(Color::Yellow));
+                let price_cell = Cell::from(price_text).style(price_style);
+                let cum_cell = Cell::from(cum_text).style(Style::default().fg(Color::DarkGray));
+                Row::new(vec![price_cell, size_cell, delta_cell, cum_cell])
+            }
         })
         .collect();
 
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(10),
-            Constraint::Length(8),
-            Constraint::Min(7),
-        ],
-    )
-    .header(header)
-    .block(
+    let constraints = if is_up {
+        [Constraint::Min(7), Constraint::Length(7), Constraint::Length(8), Constraint::Length(10)]
+    } else {
+        [Constraint::Length(10), Constraint::Length(8), Constraint::Length(7), Constraint::Min(7)]
+    };
+
+    let total_value: f64 = bids.iter().map(|b| b[0] * b[1]).sum();
+    let total_shares: f64 = bids.iter().map(|b| b[1]).sum();
+    let bottom_title = format!(" ${:.0} | {:.0} shares ", total_value, total_shares);
+
+    let block = if is_up {
         Block::default()
             .borders(Borders::ALL)
             .title(title)
-            .title_style(Style::default().fg(title_color)),
-    );
+            .title_alignment(Alignment::Right)
+            .title_style(Style::default().fg(title_color))
+            .title_bottom(Line::from(bottom_title).right_aligned().style(Style::default().fg(Color::DarkGray)))
+    } else {
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .title_style(Style::default().fg(title_color))
+            .title_bottom(Line::from(bottom_title).style(Style::default().fg(Color::DarkGray)))
+    };
+
+    let table = Table::new(rows, constraints)
+        .header(header)
+        .block(block);
 
     frame.render_widget(table, area);
 }

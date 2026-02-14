@@ -738,7 +738,7 @@ impl DemoTradingState {
             current_tick: 0,
             is_paused: true,
             is_trading_paused: false,
-            speed_index: 3, // 1x speed
+            speed_index: 5, // 1x speed
             last_frame_time: Instant::now(),
             accumulated_time_ms: 0.0,
             portfolio: Portfolio::new(),

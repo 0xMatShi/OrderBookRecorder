@@ -6,6 +6,7 @@ use std::time::Instant;
 
 const SIZE_EPSILON: f64 = 0.5;
 const CHECKPOINT_INTERVAL: usize = 500;
+const MAX_PLACEMENT_LEVEL: usize = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TrackedOrderStatus {
@@ -78,7 +79,7 @@ impl SizeTrackerState {
             history: Vec::new(),
             next_id: 1,
             is_paused: true,
-            speed_index: 3,
+            speed_index: 5, // 1x speed
             last_frame_time: Instant::now(),
             accumulated_time_ms: 0.0,
             checkpoints: Vec::new(),
@@ -310,7 +311,8 @@ impl SizeTrackerState {
                 (&tick.down_bids, &prev_tick.down_bids)
             };
 
-            for level in current_bids {
+            let top_levels = &current_bids[..current_bids.len().min(MAX_PLACEMENT_LEVEL)];
+            for level in top_levels {
                 let price = level[0];
                 let size = level[1];
 
