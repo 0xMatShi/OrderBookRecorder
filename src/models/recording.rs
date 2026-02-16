@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-pub const ORDER_BOOK_DEPTH: usize = 20;
+pub const ORDER_BOOK_DEPTH: usize = 12;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordingMetadata {

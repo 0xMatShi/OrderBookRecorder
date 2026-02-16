@@ -102,6 +102,7 @@ impl ReplayState {
                 break;
             }
         }
+
     }
 
     pub fn current_time_str(&self) -> String {

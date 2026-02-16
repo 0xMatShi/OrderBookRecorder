@@ -74,7 +74,7 @@ fn draw_ui(frame: &mut Frame, state: &ReplayState) {
     // Top panel: Info | Keys
     let top_layout = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
         .split(main_layout[0]);
 
     draw_info_panel(frame, state, top_layout[0]);
@@ -132,34 +132,15 @@ fn draw_info_panel(frame: &mut Frame, state: &ReplayState, area: Rect) {
             ),
         ]),
         Line::from(vec![
-            Span::styled("Slug: ", Style::default().fg(Color::Gray)),
-            Span::styled(
-                &state.recording.metadata.slug,
-                Style::default().fg(Color::Cyan),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Latency: ", Style::default().fg(Color::Gray)),
-            Span::styled(
-                latency_text,
-                Style::default().fg(Color::Blue),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(vec![
             Span::styled("Tick: ", Style::default().fg(Color::Gray)),
             Span::styled(tick_info, Style::default().fg(Color::Yellow)),
-        ]),
-        Line::from(vec![
-            Span::styled("Time: ", Style::default().fg(Color::Gray)),
+            Span::styled("  Time: ", Style::default().fg(Color::Gray)),
             Span::styled(time_info, Style::default().fg(Color::Yellow)),
         ]),
         Line::from(vec![
             Span::styled("Speed: ", Style::default().fg(Color::Gray)),
             Span::styled(speed_str, Style::default().fg(Color::Magenta)),
-        ]),
-        Line::from(vec![
-            Span::styled("Status: ", Style::default().fg(Color::Gray)),
+            Span::styled("  Status: ", Style::default().fg(Color::Gray)),
             Span::styled(
                 status,
                 Style::default().fg(if state.is_paused {
@@ -168,6 +149,8 @@ fn draw_info_panel(frame: &mut Frame, state: &ReplayState, area: Rect) {
                     Color::Green
                 }),
             ),
+            Span::styled("  Latency: ", Style::default().fg(Color::Gray)),
+            Span::styled(latency_text, Style::default().fg(Color::Blue)),
         ]),
     ];
 
@@ -334,7 +317,7 @@ fn draw_order_book(frame: &mut Frame, state: &ReplayState, area: Rect, is_up: bo
         Cell::from("Price").style(Style::default().fg(Color::Gray)),
         Cell::from("Size").style(Style::default().fg(Color::Gray)),
         Cell::from("Δ").style(Style::default().fg(Color::Gray)),
-        Cell::from("Cost($)").style(Style::default().fg(Color::Gray)),
+        Cell::from("Cum$").style(Style::default().fg(Color::Gray)),
     ])
     .height(1)
     .bottom_margin(1);
@@ -382,7 +365,8 @@ fn draw_order_book(frame: &mut Frame, state: &ReplayState, area: Rect, is_up: bo
         .map(|(i, bid)| {
             let price = bid[0];
             let size = bid[1];
-            cumulative_cost += price * size;
+            let dollar = price * size;
+            cumulative_cost += dollar;
 
             // Compute delta
             let (delta_str, delta_color) = if prev_bids.is_empty() {
@@ -395,17 +379,13 @@ fn draw_order_book(frame: &mut Frame, state: &ReplayState, area: Rect, is_up: bo
                 } else if diff > 0.0 {
                     (format!("+{:.0}", diff), Color::Green)
                 } else {
-                    // Размер уменьшился
-                    // Проверяем: есть ли price_change с текущим timestamp для этой цены?
-                    // Если да - это FILL (трейд), иначе - CANCEL (отмена ордера)
-                    // Используем числовое сравнение с epsilon для точности (не строки!)
                     let is_fill = is_from_book ||
                         (has_book_at_current_ts && filled_prices.iter().any(|&p| (p - price).abs() < 1e-6));
 
                     let color = if is_fill {
-                        Color::Magenta // FILL (трейд)
+                        Color::Magenta
                     } else {
-                        Color::Red // CANCEL (отмена ордера)
+                        Color::Red
                     };
                     (format!("{:.0}", diff), color)
                 }
@@ -418,9 +398,9 @@ fn draw_order_book(frame: &mut Frame, state: &ReplayState, area: Rect, is_up: bo
                 Cell::from({
                     let cents = price * 100.0;
                     if (cents - cents.round()).abs() < 0.01 {
-                        format!("{:.0}¢", cents)
+                        format!("{:.0}\u{00a2}", cents)
                     } else {
-                        format!("{:.1}¢", cents)
+                        format!("{:.1}\u{00a2}", cents)
                     }
                 }).style(Style::default().fg(Color::White)),
                 Cell::from(format!("{:.0}", size)).style(Style::default().fg(Color::Yellow)),
@@ -435,7 +415,7 @@ fn draw_order_book(frame: &mut Frame, state: &ReplayState, area: Rect, is_up: bo
         rows,
         [
             Constraint::Length(3),
-            Constraint::Length(7),
+            Constraint::Length(12),
             Constraint::Length(8),
             Constraint::Length(7),
             Constraint::Min(8),

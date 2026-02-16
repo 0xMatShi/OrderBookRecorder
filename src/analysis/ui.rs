@@ -86,7 +86,7 @@ fn draw_ui(frame: &mut Frame, state: &SizeTrackerState) {
     // Right side: OBI on top, then Up Bids | Down Bids side by side
     let right_vertical = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Min(10)])
+        .constraints([Constraint::Length(14), Constraint::Min(10)])
         .split(main_layout[1]);
 
     let right_books = Layout::default()
@@ -479,50 +479,210 @@ fn draw_history_panel(frame: &mut Frame, state: &SizeTrackerState, area: Rect) {
 }
 
 fn draw_obi_panel(frame: &mut Frame, state: &SizeTrackerState, area: Rect) {
-    const OBI_DEPTH: usize = 6;
+    const OBI_DEPTHS: [usize; 6] = [2, 4, 6, 8, 10, 12];
+    const LAMBDA: f64 = 0.15; // параметр затухания для WOBI
 
-    let (up_vol, down_vol, up_bid_vol, up_ask_vol) = if !state.recording.ticks.is_empty() {
+    let mut lines = Vec::new();
+
+    if !state.recording.ticks.is_empty() {
         let tick = &state.recording.ticks[state.current_tick];
-        let uv: f64 = tick.up_bids.iter().take(OBI_DEPTH).map(|b| b[0] * b[1]).sum();
-        let dv: f64 = tick.down_bids.iter().take(OBI_DEPTH).map(|b| b[0] * b[1]).sum();
-        // Full OBI: UP bids vs UP asks (derived from DOWN bids)
-        // DOWN bid at price P = UP ask at price (1-P)
-        let ua: f64 = tick.down_bids.iter().take(OBI_DEPTH).map(|b| (1.0 - b[0]) * b[1]).sum();
-        (uv, dv, uv, ua)
+
+        // Массивы для хранения OBI значений на всех глубинах
+        let mut v_obis = Vec::new();   // Volume OBI (по долларам)
+        let mut sh_obis = Vec::new();  // Shares OBI (по акциям)
+
+        // Рассчитываем OBI для всех глубин
+        for &depth in &OBI_DEPTHS {
+            // Shares OBI (по количеству акций)
+            let up_shares: f64 = tick.up_bids.iter().take(depth).map(|b| b[1]).sum();
+            let down_shares: f64 = tick.down_bids.iter().take(depth).map(|b| b[1]).sum();
+
+            let sh_total = up_shares + down_shares;
+            let sh_obi = if sh_total > 0.0 { (up_shares - down_shares) / sh_total } else { 0.0 };
+
+            // Volume OBI (по долларам): (V_UP - V_DOWN) / (V_UP + V_DOWN)
+            // где V = sum(price × size)
+            let up_vol: f64 = tick.up_bids.iter().take(depth).map(|b| b[0] * b[1]).sum();
+            let down_vol: f64 = tick.down_bids.iter().take(depth).map(|b| b[0] * b[1]).sum();
+
+            let v_total = up_vol + down_vol;
+            let v_obi = if v_total > 0.0 { (up_vol - down_vol) / v_total } else { 0.0 };
+
+            v_obis.push(v_obi);
+            sh_obis.push(sh_obi);
+
+            // Цвета для значений
+            let v_color = if v_obi > 0.05 {
+                Color::Green
+            } else if v_obi < -0.05 {
+                Color::Red
+            } else {
+                Color::Yellow
+            };
+
+            let sh_color = if sh_obi > 0.05 {
+                Color::Green
+            } else if sh_obi < -0.05 {
+                Color::Red
+            } else {
+                Color::Yellow
+            };
+
+            // Форматируем строку: "2 | V_OBI = +0.12 | Sh_OBI = +0.32"
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:2}", depth), Style::default().fg(Color::Gray)),
+                Span::styled(" | V_OBI = ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{:+.2}", v_obi),
+                    Style::default().fg(v_color),
+                ),
+                Span::styled(" | Sh_OBI = ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{:+.2}", sh_obi),
+                    Style::default().fg(sh_color),
+                ),
+            ]).alignment(Alignment::Center));
+        }
+
+        // Разделитель
+        lines.push(Line::from("").alignment(Alignment::Center));
+
+        // ─── 1. WOBI (Weighted OBI) ────────────────────────────
+        // Рассчитываем веса: ŵ_i = e^(-λ·d_i)
+        let raw_weights: Vec<f64> = OBI_DEPTHS.iter().map(|&d| (-LAMBDA * d as f64).exp()).collect();
+        let sum_weights: f64 = raw_weights.iter().sum();
+        let weights: Vec<f64> = raw_weights.iter().map(|w| w / sum_weights).collect();
+
+        // WOBI = Σ(w_i × OBI(d_i))
+        let wobi_v: f64 = weights.iter().zip(&v_obis).map(|(w, obi)| w * obi).sum();
+        let wobi_sh: f64 = weights.iter().zip(&sh_obis).map(|(w, obi)| w * obi).sum();
+
+        let wobi_v_color = if wobi_v > 0.05 { Color::Green } else if wobi_v < -0.05 { Color::Red } else { Color::Yellow };
+        let wobi_sh_color = if wobi_sh > 0.05 { Color::Green } else if wobi_sh < -0.05 { Color::Red } else { Color::Yellow };
+
+        lines.push(Line::from(vec![
+            Span::styled("WOBI", Style::default().fg(Color::Gray)),
+            Span::styled(" | V = ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:+.2}", wobi_v), Style::default().fg(wobi_v_color)),
+            Span::styled(" | Sh = ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:+.2}", wobi_sh), Style::default().fg(wobi_sh_color)),
+        ]).alignment(Alignment::Center));
+
+        // ─── WOBI Delta (текущий - предыдущий) ─────────────────
+        if state.current_tick > 0 {
+            let prev_tick = &state.recording.ticks[state.current_tick - 1];
+
+            // Рассчитываем WOBI для предыдущего тика
+            let mut prev_v_obis = Vec::new();
+            let mut prev_sh_obis = Vec::new();
+
+            for &depth in &OBI_DEPTHS {
+                // Shares OBI
+                let up_shares: f64 = prev_tick.up_bids.iter().take(depth).map(|b| b[1]).sum();
+                let down_shares: f64 = prev_tick.down_bids.iter().take(depth).map(|b| b[1]).sum();
+                let sh_total = up_shares + down_shares;
+                let sh_obi = if sh_total > 0.0 { (up_shares - down_shares) / sh_total } else { 0.0 };
+
+                // Volume OBI
+                let up_vol: f64 = prev_tick.up_bids.iter().take(depth).map(|b| b[0] * b[1]).sum();
+                let down_vol: f64 = prev_tick.down_bids.iter().take(depth).map(|b| b[0] * b[1]).sum();
+                let v_total = up_vol + down_vol;
+                let v_obi = if v_total > 0.0 { (up_vol - down_vol) / v_total } else { 0.0 };
+
+                prev_v_obis.push(v_obi);
+                prev_sh_obis.push(sh_obi);
+            }
+
+            let prev_wobi_v: f64 = weights.iter().zip(&prev_v_obis).map(|(w, obi)| w * obi).sum();
+            let prev_wobi_sh: f64 = weights.iter().zip(&prev_sh_obis).map(|(w, obi)| w * obi).sum();
+
+            let wobi_delta_v = wobi_v - prev_wobi_v;
+            let wobi_delta_sh = wobi_sh - prev_wobi_sh;
+
+            let delta_v_color = if wobi_delta_v > 0.01 { Color::Green } else if wobi_delta_v < -0.01 { Color::Red } else { Color::DarkGray };
+            let delta_sh_color = if wobi_delta_sh > 0.01 { Color::Green } else if wobi_delta_sh < -0.01 { Color::Red } else { Color::DarkGray };
+
+            lines.push(Line::from(vec![
+                Span::styled("WOBI △", Style::default().fg(Color::Gray)),
+                Span::styled(" | V = ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{:+.2}", wobi_delta_v), Style::default().fg(delta_v_color)),
+                Span::styled(" | Sh = ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{:+.2}", wobi_delta_sh), Style::default().fg(delta_sh_color)),
+            ]).alignment(Alignment::Center));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled("WOBI △", Style::default().fg(Color::DarkGray)),
+                Span::styled(" | V = N/A | Sh = N/A", Style::default().fg(Color::DarkGray)),
+            ]).alignment(Alignment::Center));
+        }
+
+        // ─── 2. Consensus ───────────────────────────────────────
+        // Consensus = (1/N) × Σ sgn(OBI(d_i))
+        let sgn = |x: f64| -> f64 {
+            if x > 0.001 { 1.0 } else if x < -0.001 { -1.0 } else { 0.0 }
+        };
+
+        let consensus_v: f64 = v_obis.iter().map(|&obi| sgn(obi)).sum::<f64>() / v_obis.len() as f64;
+        let consensus_sh: f64 = sh_obis.iter().map(|&obi| sgn(obi)).sum::<f64>() / sh_obis.len() as f64;
+
+        let consensus_v_color = if consensus_v > 0.3 { Color::Green } else if consensus_v < -0.3 { Color::Red } else { Color::Yellow };
+        let consensus_sh_color = if consensus_sh > 0.3 { Color::Green } else if consensus_sh < -0.3 { Color::Red } else { Color::Yellow };
+
+        lines.push(Line::from(vec![
+            Span::styled("Consensus", Style::default().fg(Color::Gray)),
+            Span::styled(" | V = ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:+.2}", consensus_v), Style::default().fg(consensus_v_color)),
+            Span::styled(" | Sh = ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:+.2}", consensus_sh), Style::default().fg(consensus_sh_color)),
+        ]).alignment(Alignment::Center));
+
+        // ─── 3. Gradient ────────────────────────────────────────
+        // K = N/2 = 3 (для 6 глубин)
+        // OBI_near = (1/K) × Σ OBI(d_i) для i=1..K (d=2,4,6)
+        // OBI_far = (1/(N-K)) × Σ OBI(d_i) для i=K+1..N (d=8,10,12)
+        // Gradient = OBI_near - OBI_far
+        let k = OBI_DEPTHS.len() / 2; // K = 3
+
+        let obi_near_v: f64 = v_obis[..k].iter().sum::<f64>() / k as f64;
+        let obi_far_v: f64 = v_obis[k..].iter().sum::<f64>() / (v_obis.len() - k) as f64;
+        let gradient_v = obi_near_v - obi_far_v;
+
+        let obi_near_sh: f64 = sh_obis[..k].iter().sum::<f64>() / k as f64;
+        let obi_far_sh: f64 = sh_obis[k..].iter().sum::<f64>() / (sh_obis.len() - k) as f64;
+        let gradient_sh = obi_near_sh - obi_far_sh;
+
+        let gradient_v_color = if gradient_v > 0.1 { Color::Green } else if gradient_v < -0.1 { Color::Red } else { Color::Yellow };
+        let gradient_sh_color = if gradient_sh > 0.1 { Color::Green } else if gradient_sh < -0.1 { Color::Red } else { Color::Yellow };
+
+        lines.push(Line::from(vec![
+            Span::styled("Gradient", Style::default().fg(Color::Gray)),
+            Span::styled(" | V = ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:+.2}", gradient_v), Style::default().fg(gradient_v_color)),
+            Span::styled(" | Sh = ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:+.2}", gradient_sh), Style::default().fg(gradient_sh_color)),
+        ]).alignment(Alignment::Center));
+
     } else {
-        (0.0, 0.0, 0.0, 0.0)
-    };
-
-    // OBI: (V_up - V_down) / (V_up + V_down)
-    let total = up_vol + down_vol;
-    let obi = if total > 0.0 { (up_vol - down_vol) / total } else { 0.0 };
-
-    // Full OBI: (V_bid - V_ask) / (V_bid + V_ask) for UP side
-    let full_total = up_bid_vol + up_ask_vol;
-    let full_obi = if full_total > 0.0 { (up_bid_vol - up_ask_vol) / full_total } else { 0.0 };
-
-    let obi_color = if obi > 0.1 { Color::Green } else if obi < -0.1 { Color::Red } else { Color::Yellow };
-    let full_obi_color = if full_obi > 0.1 { Color::Green } else if full_obi < -0.1 { Color::Red } else { Color::Yellow };
-
-    let lines = vec![
-        Line::from(vec![
-            Span::styled("OBI: ", Style::default().fg(Color::Gray)),
-            Span::styled(format!("{:+.2}", obi), Style::default().fg(obi_color).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("  (U: ${:.0} | D: ${:.0})", up_vol, down_vol), Style::default().fg(Color::DarkGray)),
-        ]).alignment(Alignment::Center),
-        Line::from(vec![
-            Span::styled("Full: ", Style::default().fg(Color::Gray)),
-            Span::styled(format!("{:+.2}", full_obi), Style::default().fg(full_obi_color).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("  (Bid: ${:.0} | Ask: ${:.0})", up_bid_vol, up_ask_vol), Style::default().fg(Color::DarkGray)),
-        ]).alignment(Alignment::Center),
-    ];
+        // Если нет данных
+        for &depth in &OBI_DEPTHS {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:2}", depth), Style::default().fg(Color::DarkGray)),
+                Span::styled(" | V_OBI = N/A | Sh_OBI = N/A", Style::default().fg(Color::DarkGray)),
+            ]).alignment(Alignment::Center));
+        }
+        lines.push(Line::from("").alignment(Alignment::Center));
+        lines.push(Line::from(Span::styled("WOBI | V = N/A | Sh = N/A", Style::default().fg(Color::DarkGray))).alignment(Alignment::Center));
+        lines.push(Line::from(Span::styled("WOBI △ | V = N/A | Sh = N/A", Style::default().fg(Color::DarkGray))).alignment(Alignment::Center));
+        lines.push(Line::from(Span::styled("Consensus | V = N/A | Sh = N/A", Style::default().fg(Color::DarkGray))).alignment(Alignment::Center));
+        lines.push(Line::from(Span::styled("Gradient | V = N/A | Sh = N/A", Style::default().fg(Color::DarkGray))).alignment(Alignment::Center));
+    }
 
     let paragraph = Paragraph::new(lines)
         .alignment(Alignment::Center)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" OBI ")
+                .title(" OBI Analysis ")
                 .title_alignment(Alignment::Center),
         );
     frame.render_widget(paragraph, area);
